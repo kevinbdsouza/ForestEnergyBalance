@@ -5,6 +5,7 @@ __pycache__/
 
 plots/
 old/
+docs/
 
 # C extensions
 *.so
