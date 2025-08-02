@@ -1,212 +1,293 @@
 """
-Adaptive Forest‑Management RL Environment v2
-===========================================
-*Updates over the initial `forest_rl_training.py`*
--------------------------------------------------
-1. **Multi‑Year Horizon** – episodes are now *5 years* (1 825 days) so the
-   agent can learn seasonal and inter‑annual trade‑offs.
-2. **Richer Action Space** (5 continuous controls)
-   ┌─────────────┬────────────────────────────────────────────┐
-   │ Index       │ Management lever (per m² of ground)        │
-   ├─────────────┼────────────────────────────────────────────┤
-   │   0         │ Δ LAI_max  [−1 … +1]                       │
-   │   1         │ Δ canopy albedo α_can_base [−0.05 … +0.05] │
-   │   2         │ Δ species‑mix (proportion deciduous)       │
-   │   3         │ Δ moss/organic layer thickness [m]         │
-   │   4         │ Δ soil‑water target [−20 … +20 mm]          │
-   └─────────────┴────────────────────────────────────────────┘
-3. **Carbon & Thaw Diagnostics**
-   * `biomass_C` (kg C m⁻²) – simple LAI‑based accrual model.
-   * `thaw_degree_days` – cumulative (T_soil_surf − 0 °C)+ over time.
-4. **Composite Reward** (weights tune‑able):
-   ```
-   R = − w_EE  · max(0, H_total)                # surface energy export
-       − w_thaw· thaw_degree_days_today/50      # penalise active‑layer growth
-       + w_C   · Δ_biomass_C_today              # reward sequestration
-   ```
-5. **Observation Vector (14 dims)** – adds biomass C, thaw D‑days, species mix,
-   moss thickness, target SWC, and soil deep temperature.
-6. **Species‑Mix Dynamics** – parameter blend between deciduous and coniferous
-   templates applied *gradually* (1 % per month) for realism.
-7. **Soil Insulation & Moisture Control** – moss layer lowers `k_soil`, higher
-   target SWC nudges soil‑water content via artificial irrigation/drainage.
+Boreal Forest Management RL Environment
+=======================================
 
-Run‑time CLI remains:
-```bash
-pip install numpy pandas gymnasium stable-baselines3==2.2.1
-python forest_rl_training.py         # now v2
-```
+This script implements a reinforcement learning pipeline for adaptive boreal
+forest management. The environment is designed based on the following principles:
+
+1.  **Time-Scale Separation**: The RL agent makes a decision once per simulated
+    year, while the underlying physical model (`energy_balance_rc.py`) runs at a
+    15-minute resolution.
+
+2.  **Discrete Action Space**: The agent has two primary levers:
+    *   **Stand Density**: Thinning or planting, changing stems per hectare.
+    *   **Species Mix**: Nudging the forest composition towards deciduous or
+        coniferous species.
+    This is implemented as a `gym.spaces.MultiDiscrete([5, 3])`.
+
+3.  **Stochasticity**: Each episode represents a 30-year rollout under a unique,
+    stochastically generated weather sequence. This forces the agent to learn
+    policies that are robust to climate variability.
+
+4.  **Multi-Objective Reward**: The reward function balances two objectives:
+    *   Maximizing carbon sequestration.
+    *   Minimizing soil thaw (measured in thaw-degree-days).
+    The scalarized reward is `R_t = w_C * Δcarbon_t - w_T * thaw_degree_days_t`.
+
+5.  **Algorithm**: The recommended training algorithm is PPO (Proximal Policy
+    Optimization) with Generalized Advantage Estimation (GAE), suitable for
+    long-horizon tasks with sparse rewards.
+
+This setup allows the agent to learn management strategies that account for
+long-term ecological feedbacks and are robust to an uncertain future climate.
 """
-
-# forest_rl_training.py  v2 – multi‑objective, multi‑year RL
 from __future__ import annotations
-import numpy as np, gymnasium as gym
+
+import gymnasium as gym
+import numpy as np
 from gymnasium import spaces
 from stable_baselines3 import PPO
-from stable_baselines3.common.env_util import make_vec_env
-from typing import Dict, Any, Tuple
-import energy_balance_model_v4_3_fixed as ebm
+from stable_baselines3.common.env_checker import check_env
 
-# -----------------------------------------------------------------------------
-# Helper: linear blend between two parameter dictionaries
-# -----------------------------------------------------------------------------
-_CONIF = ebm.get_baseline_parameters("coniferous", ebm.get_model_config())
-_DECID = ebm.get_baseline_parameters("deciduous", ebm.get_model_config())
-def _blend_params(alpha: float) -> Dict[str, Any]:
-    p = {}
-    for k in _CONIF:
-        v1, v2 = _CONIF[k], _DECID[k]
-        p[k] = (1 - alpha) * v1 + alpha * v2 if isinstance(v1, (int, float)) else v2
-    return p
+# Import the refactored simulation model
+# Note: We will need to modify energy_balance_rc.py for this to work
+import energy_balance_rc as ebm
 
-# -----------------------------------------------------------------------------
-class ForestAdaptiveEnv(gym.Env):
-    """5‑year forest‑management environment with multi‑objective reward."""
-    metadata = {}
-    _DT_DAYS = 1      # env step = 1 day → roll 96×15‑min solver steps
-    _EP_DAYS = 5*365  # 5 year episodes
 
-    # ‑‑‑ action bounds ------------------------------------------------------
-    ACT_LOW  = np.array([-1.0, -0.05, -0.5, -0.05, -20.0], np.float32)
-    ACT_HIGH = np.array([ 1.0,  0.05,  0.5,  0.05,  20.0], np.float32)
+class ForestEnv(gym.Env):
+    """
+    A Gym environment for boreal forest management.
+    """
+    metadata = {'render_modes': []}
 
-    # ‑‑‑ reward weights -----------------------------------------------------
-    w_EE, w_thaw, w_C = 1.0, 0.5, 2.0
+    # --- Constants ---
+    EPISODE_LENGTH_YEARS = 30
+    MIN_STEMS_HA = 100
+    MAX_STEMS_HA = 2500
 
-    def __init__(self, seed: int | None = None):
+    # --- Action Mapping ---
+    # Δdensity ∈ {−300, −150, 0, +150, +300} stems ha⁻¹
+    DENSITY_ACTIONS = [-300, -150, 0, 150, 300]
+    # Δmix ∈ {−0.1, 0, +0.1} (conifer↔deciduous fraction)
+    MIX_ACTIONS = [-0.1, 0, 0.1]
+
+    # --- Reward Weights ---
+    W_CARBON = 1.0  # Weight for carbon sequestration
+    W_THAW = 0.01   # Weight for thaw penalty
+
+    def __init__(self, config: dict | None = None):
         super().__init__()
-        self.action_space = spaces.Box(self.ACT_LOW, self.ACT_HIGH, dtype=np.float32)
 
-        # obs: canopy T, soil T_surf/deep, air T, SWC, SWE, LAI, solar, vpd,
-        #       H_total, biomass_C, thaw_deg_days, species_mix, moss_thick
-        obs_lo = np.array([200, 250, 250, 200,   0,   0, 0, 0, 0, -500,   0, 0, 0, 0], np.float32)
-        obs_hi = np.array([330, 320, 320, 330, 300, 500, 6, 1200, 5,  500, 30, 2e4, 1, 0.3], np.float32)
-        self.observation_space = spaces.Box(obs_lo, obs_hi, dtype=np.float32)
-        self._rng = np.random.default_rng(seed)
-        self.reset()
+        self.config = config if config is not None else {}
 
-    # ------------------------------------------------------------------
+        # --- Action and Observation Spaces ---
+        self.action_space = spaces.MultiDiscrete([
+            len(self.DENSITY_ACTIONS),
+            len(self.MIX_ACTIONS)
+        ])
+
+        # Observation space: [year, norm_density, mix_fraction, norm_carbon_stock]
+        self.observation_space = spaces.Box(
+            low=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            high=np.array([1.0, 1.0, 1.0, 5.0], dtype=np.float32), # Carbon stock can exceed 1
+            dtype=np.float32
+        )
+
+        # To be initialized on reset
+        self.simulator = None
+        self.year = 0
+        self.stem_density = 0
+        self.conifer_fraction = 0.0
+        self.carbon_stock_kg_m2 = 0.0
+        self.cumulative_thaw_dd = 0.0
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
-        if seed is not None:
-            self._rng = np.random.default_rng(seed)
-        # management state vars
-        self.species_mix   = 0.5   # 0=conifer, 1=deciduous
-        self.moss_thick_m  = 0.05  # m of organic layer
-        self.target_SWC_mm = 0.75 * _CONIF['SWC_max_mm']
+        super().reset(seed=seed)
 
-        # physics params blend + overwrite soil k
-        self.p = _blend_params(self.species_mix)
-        self._apply_moss_effect()
-        self.S = {
-            "canopy":265., "trunk":265., "snow":268.,
-            "soil_surf":270., "soil_deep":270., "atm_model":265.,
-            "SWE":0., "SWE_can":0., "SWC_mm":self.target_SWC_mm,
-        }
-        self.day_count = 0
-        self.biomass_C = 10.0  # kg C m⁻²
-        self.thaw_degree_days = 0.0
-        self._last_H = 0.0
-        self._last_thaw_today = 0.0
-        return self._get_obs(), {}
+        # --- Initialize Forest State ---
+        self.year = 0
+        self.stem_density = 800  # Starting stems per hectare
+        self.conifer_fraction = 0.5  # Start with a 50/50 mix
+        self.carbon_stock_kg_m2 = 15.0  # Initial carbon stock in kg C/m^2
+        self.cumulative_thaw_dd = 0.0
 
-    # ------------------------------------------------------------------
+        # --- Initialize Simulator for a New Monte-Carlo Episode ---
+        # The simulator is instantiated with a new random seed for weather.
+        self.simulator = ebm.ForestSimulator(
+            coniferous_fraction=self.conifer_fraction,
+            stem_density=self.stem_density,
+            carbon_stock_kg_m2=self.carbon_stock_kg_m2,
+            weather_seed=self.np_random.integers(0, 2**31 - 1)
+        )
+
+        return self._get_obs(), self._get_info()
+
     def step(self, action: np.ndarray):
-        # 1│ apply management deltas ------------------------------------
-        d_lai, d_alb, d_mix, d_moss, d_swc = action.astype(float)
-        self.p['LAI_max']       = np.clip(self.p['LAI_max'] + d_lai, 0.5, 7.0)
-        self.p['alpha_can_base']= np.clip(self.p['alpha_can_base'] + d_alb, 0.02, 0.40)
-        self.species_mix        = np.clip(self.species_mix + d_mix, 0.0, 1.0)
-        self.moss_thick_m       = np.clip(self.moss_thick_m + d_moss, 0.00, 0.30)
-        self.target_SWC_mm      = np.clip(self.target_SWC_mm + d_swc, 0, self.p['SWC_max_mm'])
+        # 1. Decode action and update management state
+        density_action_idx, mix_action_idx = action
+        delta_density = self.DENSITY_ACTIONS[density_action_idx]
+        delta_mix = self.MIX_ACTIONS[mix_action_idx]
 
-        # gradual species mix adjustment (1 % per *month*)
-        if self.day_count % 30 == 0:
-            self.p = _blend_params(self.species_mix)
-        self._apply_moss_effect()
+        # Apply thinning/planting
+        new_density = self.stem_density + delta_density
+        # Track carbon loss from thinning
+        carbon_loss_thinning = 0
+        if new_density < self.stem_density:
+             # Assume thinning removes a proportional amount of carbon stock
+             carbon_loss_thinning = self.carbon_stock_kg_m2 * (self.stem_density - new_density) / self.stem_density
 
-        H_total_accum = 0.0
-        thaw_today = 0.0
-        L_stab = 1e6
-        for t in range(self.p['STEPS_PER_DAY']):
-            hr = t * self.p['TIME_STEP_MINUTES']/60
-            day_of_year = (self.day_count % 365)+1
-            self.p = ebm.update_dynamic_parameters(self.p, day_of_year, hr, self.S, L_stab)
-            flux, dSWE_g, dSWE_c = ebm.calculate_fluxes_and_melt(self.S, self.p)
-            # ► minimal water: irrigation / drainage to target SWC
-            self.S['SWC_mm'] += (self.target_SWC_mm - self.S['SWC_mm']) * 0.01
-            self.S['SWE']     = max(0., self.S['SWE'] - dSWE_g)
-            self.S['SWE_can'] = max(0., self.S['SWE_can'] - dSWE_c)
-            # ► temps
-            self.S['canopy'] = flux['canopy']['T_new']
-            for node in ['trunk','snow','soil_surf','soil_deep','atm_model']:
-                F = sum(flux[node].values()); C = self._heat_cap(node)
-                dT = (F/self.p['DT_SECONDS'])/C if C>0 else 0
-                self.S[node] = ebm.safe_update(self.S[node], dT, self.p)
-            # ► stability for next 15‑min
-            H_total = (flux['atm_model']['H_can']+flux['atm_model']['H_trunk']+
-                        flux['atm_model']['H_soil']+flux['atm_model']['H_snow'])
-            L_stab = 1e6 if abs(H_total)<1e-3 else (-self.p['RHO_AIR']*self.p['CP_AIR']*
-                    (2*0.41)**3*self.p['T_atm'])/(0.41*self.p['G_ACCEL']*H_total)
-            H_total_accum += H_total
-            if self.S['soil_surf']>273.15:
-                thaw_today += (self.S['soil_surf']-273.15)*self.p['DT_SECONDS']/86400
-        # --- end‑of‑day updates ----------------------------------------
-        self._last_H = H_total_accum/self.p['STEPS_PER_DAY']
-        self.thaw_degree_days += thaw_today
-        self._last_thaw_today = thaw_today
-        # gross C uptake (toy NPP):
-        NPP = 1e-4 * self.p['Q_solar'] * self.p['LAI_actual'] / 48  # kg C m⁻² day⁻¹
-        self.biomass_C += NPP - max(0,-d_lai)*0.5  # thinning releases C
-        # reward scalarisation -----------------------------------------
-        r = (-self.w_EE * max(0,self._last_H)/100
-             -self.w_thaw * thaw_today/50
-             +self.w_C * NPP)
-        self.day_count += 1
-        terminated = self.day_count >= self._EP_DAYS
-        return self._get_obs(), float(r), terminated, False, {
-            'H_Wm2': self._last_H,
-            'thaw_today': thaw_today,
-            'biomass_C': self.biomass_C,
-        }
+        self.stem_density = np.clip(new_density, self.MIN_STEMS_HA, self.MAX_STEMS_HA)
+        self.carbon_stock_kg_m2 -= carbon_loss_thinning
 
-    # ------------------------------------------------------------------
-    def _heat_cap(self,node:str):
-        return {
-            'trunk':self.p['C_TRUNK'], 'snow':self.p['C_SNOW'],
-            'soil_surf':self.p['C_SOIL_TOTAL']*0.15,
-            'soil_deep':self.p['C_SOIL_TOTAL']*0.85,
-            'atm_model':self.p['C_ATM']
-        }.get(node,1.)
+        # Apply species mix change
+        self.conifer_fraction = np.clip(self.conifer_fraction + delta_mix, 0.0, 1.0)
 
-    def _apply_moss_effect(self):
-        # exponential insulation effect on soil conductivity & albedo tweak
-        self.p['k_soil'] = max(0.3, 1.2 * np.exp(-5*self.moss_thick_m))
-        self.p['alpha_soil'] = 0.20 + 0.3*self.moss_thick_m
+        # 2. Run the physical simulation for one year
+        # This is the main call to the modified energy_balance_rc module.
+        # The simulator is updated with the new density and mix from the action.
+        annual_results = self.simulator.run_annual_cycle(
+            new_conifer_fraction=self.conifer_fraction,
+            new_stem_density=self.stem_density
+        )
+        ΔC_year = annual_results['delta_carbon_kg_m2']
+        thaw_dd_year = annual_results['thaw_degree_days']
+
+        self.carbon_stock_kg_m2 += ΔC_year
+        self.cumulative_thaw_dd += thaw_dd_year
+
+        # 3. Calculate reward
+        reward_carbon = self.W_CARBON * ΔC_year
+        penalty_thaw = self.W_THAW * thaw_dd_year
+        reward = reward_carbon - penalty_thaw
+
+        # 4. Update state and check for termination
+        self.year += 1
+        terminated = self.year >= self.EPISODE_LENGTH_YEARS
+        truncated = False # Not using time limits other than episode end
+
+        return self._get_obs(), reward, terminated, truncated, self._get_info()
 
     def _get_obs(self):
-        p,s = self.p,self.S
-        vpd = max(0., ebm.esat_kPa(p['T_atm'])-p['ea'])
+        norm_year = self.year / self.EPISODE_LENGTH_YEARS
+        norm_density = (self.stem_density - self.MIN_STEMS_HA) / (self.MAX_STEMS_HA - self.MIN_STEMS_HA)
+        # Normalize carbon stock assuming a plausible max value (e.g., 50 kg C/m^2)
+        norm_carbon = self.carbon_stock_kg_m2 / 50.0
+
         return np.array([
-            s['canopy'], s['soil_surf'], s['soil_deep'], p['T_atm'], s['SWC_mm'],
-            (s['SWE']+s['SWE_can'])*1000, p['LAI_actual'], p['Q_solar'], vpd,
-            self._last_H, self.biomass_C, self.thaw_degree_days,
-            self.species_mix, self.moss_thick_m
-        ], np.float32)
+            norm_year,
+            norm_density,
+            self.conifer_fraction,
+            norm_carbon
+        ], dtype=np.float32)
 
-    # no render/close needed
+    def _get_info(self):
+        return {
+            "year": self.year,
+            "stem_density_ha": self.stem_density,
+            "conifer_fraction": self.conifer_fraction,
+            "carbon_stock_kg_m2": self.carbon_stock_kg_m2,
+            "cumulative_thaw_dd": self.cumulative_thaw_dd
+        }
 
-# -----------------------------------------------------------------------------
-# Training helper
-# -----------------------------------------------------------------------------
+    def close(self):
+        # Any necessary cleanup
+        pass
 
-def train(total_steps:int=2_000_000, n_env:int=8):
-    venv = make_vec_env(lambda: ForestAdaptiveEnv(), n_envs=n_env, seed=0)
-    model = PPO('MlpPolicy', venv, learning_rate=2.5e-4, n_steps=2048//n_env,
-                batch_size=1024, gamma=0.999, gae_lambda=0.97,
-                ent_coef=0.01, vf_coef=0.4, target_kl=0.03, verbose=1)
-    model.learn(total_timesteps=total_steps, progress_bar=True)
-    model.save('ppo_forest_multiobj')
-    venv.close(); print('Saved to ppo_forest_multiobj.zip')
+# --- Training Script ---
+def train(total_timesteps=200_000, n_envs=4):
+    """
+    A helper function to instantiate the environment and train a PPO agent.
+    """
+    print("Checking environment...")
+    # Check the environment to ensure it follows the Gym API.
+    check_env(ForestEnv())
+    print("Environment check passed.")
 
-if __name__=='__main__':
-    train()
+    # Vectorized environments for parallel training
+    venv = make_vec_env(ForestEnv, n_envs=n_envs, seed=42)
+
+    # PPO agent
+    # The hyperparameters are chosen as a starting point and may need tuning.
+    model = PPO(
+        "MlpPolicy",
+        venv,
+        learning_rate=3e-4,
+        n_steps=2048 // n_envs,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.0,
+        vf_coef=0.5,
+        verbose=1,
+        tensorboard_log="./ppo_forest_tensorboard/"
+    )
+
+    print("Starting training...")
+    model.learn(total_timesteps=total_timesteps, progress_bar=True)
+    model.save("ppo_forest_manager")
+    venv.close()
+    print("Training complete. Model saved to 'ppo_forest_manager.zip'")
+
+
+import argparse
+from tqdm import tqdm
+from stable_baselines3.common.env_util import make_vec_env
+
+
+def evaluate_policy(model_path="ppo_forest_manager.zip", n_eval_episodes=1000):
+    """
+    Evaluate a trained PPO agent on the ForestEnv.
+
+    :param model_path: Path to the saved model zip file.
+    :param n_eval_episodes: The number of episodes to run for evaluation.
+    """
+    print(f"Loading model from {model_path}...")
+    model = PPO.load(model_path)
+
+    # Create a single environment for evaluation
+    eval_env = ForestEnv()
+
+    print(f"Running evaluation for {n_eval_episodes} episodes...")
+
+    results = {
+        "final_carbon_stock_tC_ha": [],
+        "cumulative_thaw_dd": [],
+    }
+
+    for _ in tqdm(range(n_eval_episodes)):
+        obs, info = eval_env.reset()
+        terminated = False
+        while not terminated:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = eval_env.step(action)
+
+        # Episode is done, record final metrics
+        # Convert kg/m^2 to tonnes/hectare (1 kg/m^2 = 10 t/ha)
+        final_carbon_tC_ha = info['carbon_stock_kg_m2'] * 10
+        results["final_carbon_stock_tC_ha"].append(final_carbon_tC_ha)
+        results["cumulative_thaw_dd"].append(info['cumulative_thaw_dd'])
+
+    print("\n--- Evaluation Results ---")
+
+    # Calculate median and 95% confidence intervals
+    for key, values in results.items():
+        median = np.median(values)
+        q5 = np.percentile(values, 5)
+        q95 = np.percentile(values, 95)
+        print(f"Metric: {key}")
+        print(f"  Median: {median:.2f}")
+        print(f"  95% Interval: [{q5:.2f}, {q95:.2f}]")
+
+    eval_env.close()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Train or evaluate a PPO agent for forest management.")
+    parser.add_argument("--train", action="store_true", help="Flag to train a new model.")
+    parser.add_argument("--evaluate", action="store_true", help="Flag to evaluate a trained model.")
+    parser.add_argument("--model_path", type=str, default="ppo_forest_manager.zip", help="Path to the PPO model file.")
+    parser.add_argument("--timesteps", type=int, default=200000, help="Number of timesteps for training.")
+    parser.add_argument("--eval_episodes", type=int, default=1000, help="Number of episodes for evaluation.")
+
+    args = parser.parse_args()
+
+    if args.train:
+        print("--- Starting Training ---")
+        train(total_timesteps=args.timesteps)
+    elif args.evaluate:
+        print("--- Starting Evaluation ---")
+        evaluate_policy(model_path=args.model_path, n_eval_episodes=args.eval_episodes)
+    else:
+        print("Please specify an action: --train or --evaluate")
