@@ -127,7 +127,11 @@ def get_model_config() -> Dict[str, Any]:
         k_snow_pack=0.3,
 
         # --- Priestley-Taylor coefficient ---------------------------------
-        PT_ALPHA=1.26
+        PT_ALPHA=1.26,
+
+        # --- Photosynthesis Parameters ------------------------------------
+        PAR_FRACTION=0.5,      # Fraction of shortwave radiation that is PAR
+        LUE=0.02               # Light Use Efficiency (as energy fraction)
     )
 
 # ----------------------------------------------------------------------------------
@@ -385,7 +389,7 @@ def solve_canopy_energy_balance(
         return Q_abs_can + A_can * lw_balance
 
     def latent(T, Rn):
-        if T <= 273.15 or Rn <= 0:
+        if T <= 273.15 or Rn <= 0 or p['LAI_actual'] <= 0.1:
             return 0.0
         es = esat_kPa(T)
         vpd = max(0.0, es - ea)
@@ -395,15 +399,31 @@ def solve_canopy_energy_balance(
         fr_PT = Delta / (Delta + p['PSYCHROMETRIC_GAMMA'])
         return PT_ALPHA * fr_PT * Rn * total_stress
 
+    def photosynthesis(T, Q_abs):
+        """ Photosynthetic flux (G) as a simple LUE model. """
+        if T <= 273.15 or Q_abs <= 0 or p['LAI_actual'] <= 0.1:
+            return 0.0
+
+        # Apply same stress factors as transpiration for consistency
+        es = esat_kPa(T)
+        vpd = max(0.0, es - ea)
+        vpd_stress = np.exp(-0.15 * vpd)
+        total_stress = vpd_stress * soil_stress
+
+        par_abs = Q_abs * p['PAR_FRACTION']
+        g_flux = p['LUE'] * par_abs * total_stress
+        return g_flux
+
     # --- NEW V2: Check for melt conditions before solving for temperature ---
     melt_energy_sink = 0.0
     if SWE_can > 0:
         T_freeze = 273.15
         Rn_at_freeze = rnet(T_freeze)
         LE_at_freeze = latent(T_freeze, Rn_at_freeze)  # Will be 0
+        G_at_freeze = photosynthesis(T_freeze, Q_abs_can) # Will be 0
         H_at_freeze = h_can * (T_freeze - T_air)
         Cnd_at_freeze = k_ct * A_c2t / d_ct * (T_freeze - T_trunk)
-        F_at_freeze = Rn_at_freeze - H_at_freeze - LE_at_freeze - Cnd_at_freeze - evap_intercepted_rain_flux
+        F_at_freeze = Rn_at_freeze - H_at_freeze - LE_at_freeze - G_at_freeze - Cnd_at_freeze - evap_intercepted_rain_flux
 
         if F_at_freeze > 0:
             # Energy is available for melt. Check if it's enough to melt all snow.
@@ -412,7 +432,7 @@ def solve_canopy_energy_balance(
             if F_at_freeze < energy_to_melt_all:
                 # Partial melt: T_can is clamped at 0°C. All energy goes to melt.
                 flux_dict = dict(
-                    Rnet_can=Rn_at_freeze, H_can=-H_at_freeze, LE_can=-LE_at_freeze,
+                    Rnet_can=Rn_at_freeze, H_can=-H_at_freeze, LE_can=-LE_at_freeze, G_photo=0.0,
                     Cnd_can=-Cnd_at_freeze, Net_can=0.0,
                     Melt_flux_can=F_at_freeze, LE_int_rain=evap_intercepted_rain_flux
                 )
@@ -427,9 +447,10 @@ def solve_canopy_energy_balance(
     for _ in range(6):
         Rn = rnet(T)
         LE = latent(T, Rn)
+        G = photosynthesis(T, Q_abs_can)
         H = h_can * (T - T_air)
         Cnd = k_ct * A_c2t / d_ct * (T - T_trunk)
-        F = Rn - H - LE - Cnd - melt_energy_sink - evap_intercepted_rain_flux
+        F = Rn - H - LE - G - Cnd - melt_energy_sink - evap_intercepted_rain_flux
 
         if abs(F) < 1e-3:
             break
@@ -438,9 +459,10 @@ def solve_canopy_energy_balance(
         dT = 0.1  # K
         Rn_p = rnet(T + dT)
         LE_p = latent(T + dT, Rn_p)
+        G_p = photosynthesis(T + dT, Q_abs_can)
         H_p = h_can * (T + dT - T_air)
         Cnd_p = k_ct * A_c2t / d_ct * (T + dT - T_trunk)
-        F_p = Rn_p - H_p - LE_p - Cnd_p - melt_energy_sink - evap_intercepted_rain_flux
+        F_p = Rn_p - H_p - LE_p - G_p - Cnd_p - melt_energy_sink - evap_intercepted_rain_flux
         dF = (F_p - F) / dT
         if dF == 0:
             dF = 1e-4
@@ -450,11 +472,12 @@ def solve_canopy_energy_balance(
     # Re‑compute flux components to return --------------------------------------
     Rn = rnet(T)
     LE = latent(T, Rn)
+    G = photosynthesis(T, Q_abs_can)
     H = h_can * (T - T_air)
     Cnd = k_ct * A_c2t / d_ct * (T - T_trunk)
 
-    flux_dict = dict(Rnet_can=Rn, H_can=-H, LE_can=-LE, Cnd_can=-Cnd, Melt_flux_can=melt_energy_sink)
-    net_flux = Rn - H - LE - Cnd - melt_energy_sink - evap_intercepted_rain_flux # (≈0 by construction)
+    flux_dict = dict(Rnet_can=Rn, H_can=-H, LE_can=-LE, G_photo=-G, Cnd_can=-Cnd, Melt_flux_can=melt_energy_sink)
+    net_flux = Rn - H - LE - G - Cnd - melt_energy_sink - evap_intercepted_rain_flux # (≈0 by construction)
     flux_dict['Net_can'] = net_flux
     flux_dict['LE_int_rain'] = evap_intercepted_rain_flux # Diagnostic
 
@@ -508,6 +531,7 @@ def calculate_fluxes_and_melt(S: Dict, p: Dict) -> Tuple[Dict[str, Dict[str, flo
         'Rnet': can_flux['Rnet_can'],
         'H': can_flux['H_can'],
         'LE_trans': can_flux['LE_can'],
+        'G_photo': can_flux.get('G_photo', 0.0),
         'Cnd_trunk': can_flux['Cnd_can'],
         'Melt': -can_flux.get('Melt_flux_can', 0.0),      # as energy sink
         'LE_int_rain': -can_flux.get('LE_int_rain', 0.0) # as energy sink
