@@ -102,6 +102,7 @@ def get_model_config() -> Dict[str, Any]:
         T_seasonal_amplitude=22.0, # °C
         T_diurnal_amplitude=6.0,   # °C
         T_hour_peak_diurnal=4.0,   # hour of min temp
+        T_daily_noise_std=1.5,     # std dev for daily temp noise (K; suggested 1-2)
         # RH forcing
         mean_relative_humidity=0.70,
         # Precip forcing
@@ -253,7 +254,8 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float)
     """Update meteorological forcing and derived parameters for the current step."""
     # --- Air temperature: annual + diurnal harmonic ------------------------------
     day_angle = 2 * np.pi * (day - 1) / 365.0
-    p["T_large_scale"] = 273.15 + p['T_annual_mean_offset'] - p['T_seasonal_amplitude'] * np.cos(day_angle)
+    p["T_large_scale"] = 273.15 + p['T_annual_mean_offset'] - p['T_seasonal_amplitude'] * np.cos(day_angle) \
+                         + np.random.normal(0, p['T_daily_noise_std'])
     p["T_atm"] = p["T_large_scale"] - p['T_diurnal_amplitude'] * np.cos(2 * np.pi * (hour - p['T_hour_peak_diurnal']) / 24.0)
 
     # --- Ambient vapour pressure (for VPD calculations) -------------------------

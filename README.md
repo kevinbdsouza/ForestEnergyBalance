@@ -42,6 +42,10 @@ samples within these ranges (e.g., temperature offsets, humidity, precipitation
 probabilities), enabling Monte Carlo style analyses rather than relying on single
 deterministic values.
 
+One such parameter is `T_daily_noise_std`, which sets the standard deviation (K)
+for daily stochastic temperature forcing. A suggested range of 1–2 K captures
+typical day-to-day variability.
+
 ## Installation
 
 This project uses Python. We recommend using `uv` to manage dependencies in a virtual environment.
