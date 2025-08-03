@@ -96,8 +96,9 @@ def get_model_config() -> Dict[str, Any]:
         shoulder_1_end=150, shoulder_2_start=250, shoulder_2_end=300,
         snow_season_end=120, snow_season_start=280,
         T_daily_noise_std_range=(1.0, 2.0),  # Daily temperature noise std dev (K)
-        # --- Phenology (Fixed) --------------------------------------------
-        growth_day=140, fall_day=270, growth_rate=0.1, fall_rate=0.1,
+        # --- Phenology (Ranged DOY) --------------------------------------
+        growth_day_range=(130, 150), fall_day_range=(260, 280),
+        growth_rate=0.1, fall_rate=0.1,
         woody_area_index=0.35,
         # --- Trunk parameters (Fixed) -------------------------------------
         A_trunk_plan=0.03, A_trunk_vert=0.08, k_ct_base_con=0.18,
@@ -153,6 +154,14 @@ def get_baseline_parameters(p: Dict, coniferous_fraction: float, stem_density: f
     Initialise a parameter dictionary `p` for a given species mix,
     drawing from a base model configuration with sampled parameters.
     """
+    # Sample phenology onset/offset days if ranges remain
+    if 'growth_day_range' in p:
+        p['growth_day'] = np.random.uniform(*p['growth_day_range'])
+        del p['growth_day_range']
+    if 'fall_day_range' in p:
+        p['fall_day'] = np.random.uniform(*p['fall_day_range'])
+        del p['fall_day_range']
+
     p['coniferous_fraction'] = coniferous_fraction
     deciduous_fraction = 1.0 - coniferous_fraction
     u = p['u_ref']
@@ -220,7 +229,7 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float,
               np.cos(np.deg2rad(p['latitude_deg'])) * np.cos(np.deg2rad(decl)) * np.cos(np.deg2rad(15 * (hour - 12))))
     p["Q_solar"] = max(0.0, 1000.0 * cos_tz)
 
-    # --- Leaf phenology (mixed species) -----------------------------------
+    # --- Leaf phenology (mixed species; sampled onset/offset) ------------
     leaf_on = 1 / (1 + np.exp(-p['growth_rate'] * (day - p['growth_day'])))
     leaf_off = 1 / (1 + np.exp(p['fall_rate'] * (day - p['fall_day'])))
     LAI_deciduous_actual = p["LAI_max_deciduous"] * leaf_on * leaf_off

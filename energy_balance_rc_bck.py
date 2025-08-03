@@ -115,8 +115,8 @@ def get_model_config() -> Dict[str, Any]:
         shoulder_2_start=250, shoulder_2_end=300,
         snow_season_end=120, snow_season_start=280,
         
-        # Phenology (deciduous)
-        growth_day=140, fall_day=270,
+        # Phenology (deciduous; ranged DOY)
+        growth_day_range=(130, 150), fall_day_range=(260, 280),
         growth_rate=0.1, fall_rate=0.1,
         woody_area_index=0.35,
 
@@ -301,7 +301,7 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float)
     )
     p["Q_solar"] = max(0.0, 1000.0 * cos_tz)
 
-    # --- Leaf phenology (mixed species) ---------------------------------------
+    # --- Leaf phenology (mixed species; sampled onset/offset) -------------
     p["LAI_actual"] = 0.0
     deciduous_fraction = 1.0 - p['coniferous_fraction']
 
