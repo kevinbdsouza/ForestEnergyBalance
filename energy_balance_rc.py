@@ -160,17 +160,33 @@ def h_aero(u: float, z_ref: float, z0: float, L: float, p: Dict) -> float:
     ra = ra_log_term**2 / (p['KAPPA']**2 * u)
     return p['RHO_AIR'] * p['CP_AIR'] / max(ra, 1.0)
 
-def get_baseline_parameters(p: Dict, coniferous_fraction: float, stem_density: float) -> Dict[str, Any]:
+def get_baseline_parameters(
+    p: Dict,
+    coniferous_fraction: float,
+    stem_density: float,
+    rng: np.random.Generator,
+) -> Dict[str, Any]:
     """
-    Initialise a parameter dictionary `p` for a given species mix,
+    Initialise a parameter dictionary ``p`` for a given species mix,
     drawing from a base model configuration with sampled parameters.
+
+    Parameters
+    ----------
+    p : Dict
+        The base parameter dictionary to update.
+    coniferous_fraction : float
+        Fraction of coniferous species in the stand.
+    stem_density : float
+        Stem density in stems per hectare.
+    rng : np.random.Generator
+        Random number generator for reproducible sampling.
     """
     # Sample phenology onset/offset days if ranges remain
     if 'growth_day_range' in p:
-        p['growth_day'] = np.random.uniform(*p['growth_day_range'])
+        p['growth_day'] = rng.uniform(*p['growth_day_range'])
         del p['growth_day_range']
     if 'fall_day_range' in p:
-        p['fall_day'] = np.random.uniform(*p['fall_day_range'])
+        p['fall_day'] = rng.uniform(*p['fall_day_range'])
         del p['fall_day_range']
 
     p['coniferous_fraction'] = coniferous_fraction
@@ -503,7 +519,9 @@ class ForestSimulator:
         self.p = self._sample_parameters()
 
         # Initialize state and baseline parameters based on management levers
-        self.p = get_baseline_parameters(self.p, coniferous_fraction, stem_density)
+        self.p = get_baseline_parameters(
+            self.p, coniferous_fraction, stem_density, self.rng
+        )
 
         self.S = {
             "canopy": 265.0, "trunk": 265.0, "snow": 268.0, "soil_surf": 270.0,
@@ -528,13 +546,11 @@ class ForestSimulator:
 
         return p
 
-    def run_annual_cycle(self, new_conifer_fraction: float, new_stem_density: float,
-                         current_biomass_carbon_kg_m2: float, current_soil_carbon_kg_m2: float) -> dict:
-        total_gpp_kg_m2 = 0.0
-        total_autotrophic_resp_kg_m2 = 0.0
-        total_soil_resp_kg_m2 = 0.0
-        total_thaw_degree_days = 0.0
-        self.p = get_baseline_parameters(self.p, new_conifer_fraction, new_stem_density)
+    def run_annual_cycle(self, new_conifer_fraction: float, new_stem_density: float, current_carbon_stock_kg_m2: float) -> dict:
+        total_gpp_kg_m2, total_reco_kg_m2, total_thaw_degree_days = 0.0, 0.0, 0.0
+        self.p = get_baseline_parameters(
+            self.p, new_conifer_fraction, new_stem_density, self.rng
+        )
 
         heat_caps = {
             "canopy": self.p['C_CANOPY_LEAF_OFF'], "trunk": self.p['C_TRUNK'], "snow": self.p['C_SNOW'],
