@@ -68,7 +68,10 @@ def get_model_config() -> Dict[str, Any]:
         T_MIN=180.0, T_MAX=330.0, DT_CLIP=15.0, SWE_SMOOTHING=0.01,
         CANOPY_MIN_H=10.0, H_atm=100.0, tau_adv=3600.0,
         # --- Aerodynamic parameters (some ranged) ------------------------
-        z_ref_h=15.0, z0_can=1.5, z_ref_soil=2.0, z0_soil=0.01,
+        z_ref_h=15.0,
+        z0_can_range=(1.0, 2.0),  # canopy roughness length range (m)
+        z_ref_soil=2.0,
+        z0_soil_range=(0.005, 0.02),  # soil roughness length range (m)
         h_trunk_const=5.0, h_trunk_wind_coeff=4.0,
         u_ref_range=(1.0, 5.0),
         # --- Soil & Water parameters ( 일부는 범위로 지정) --------------------
