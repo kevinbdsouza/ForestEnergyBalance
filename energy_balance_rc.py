@@ -54,7 +54,7 @@ def get_model_config() -> Dict[str, Any]:
     NOTE: Ranges are estimates based on general ecological knowledge for
     Boreal Canada, as direct literature access was unavailable.
     """
-    return dict(
+    config = dict(
         # --- Physical constants (Fixed) -----------------------------------
         SIGMA=5.670374419e-8, RHO_AIR=1.225, CP_AIR=1005, RHO_WATER=1_000.0,
         RHO_SNOW=250.0, KAPPA=0.41, G_ACCEL=9.81, PSYCHROMETRIC_GAMMA=0.066,
@@ -107,7 +107,13 @@ def get_model_config() -> Dict[str, Any]:
         # --- Priestley-Taylor coefficient (Fixed) -------------------------
         PT_ALPHA=1.26,
         # --- Photosynthesis & Carbon Cycle (Ranged) -----------------------
-        PAR_FRACTION=0.5, LUE_J_TO_G_C=2.5e-6, J_PER_GC=3.9e4,
+        # `LUE_J_TO_G_C` converts absorbed PAR (J) to fixed carbon (gC).
+        # To keep the carbon flux and energy sink consistent, the energetic
+        # cost of fixing carbon is derived from the light‑use efficiency. We
+        # assume 10% of absorbed PAR is stored as chemical energy, giving
+        # `J_PER_GC = 0.1 / LUE_J_TO_G_C`.
+        PAR_FRACTION=0.5,
+        LUE_J_TO_G_C=2.5e-6,
         R_BASE_KG_M2_YR_range=(0.4, 0.7), Q10_range=(1.8, 2.3), T_REF_K=288.15,
         # --- RL Management Levers (Fixed) ---------------------------------
         MAX_DENSITY_FOR_FULL_CANOPY=1500.0,
@@ -117,6 +123,11 @@ def get_model_config() -> Dict[str, Any]:
         alpha_can_base_conifer_range=(0.07, 0.11),
         alpha_can_base_deciduous_range=(0.15, 0.20),
     )
+
+    # Derive the energy required to fix one gram of carbon from the light-use
+    # efficiency assuming a 10% conversion of absorbed PAR into chemical energy.
+    config["J_PER_GC"] = 0.1 / config["LUE_J_TO_G_C"]
+    return config
 
 def safe_update(T_old: float, dT: float, p: Dict) -> float:
     dT = np.clip(dT, -p['DT_CLIP'], p['DT_CLIP'])
