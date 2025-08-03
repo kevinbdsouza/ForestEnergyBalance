@@ -34,6 +34,14 @@ This model version (V4.3) includes several important features that enhance its r
 3.  **Aerodynamic Conductance:** Bulk aerodynamic conductances are calculated with a Monin-Obukhov stability correction.
 4.  **Dynamic Properties:** Many parameters, such as albedo, emissivity, and interception fractions, are updated dynamically based on the state of the system (e.g., LAI, snow cover).
 
+### Parameter Ranges for Monte Carlo
+
+To better represent variability across Boreal Canada, several climatic and radiation
+parameters are expressed as ranges in `get_model_config`. Each simulation episode
+samples within these ranges (e.g., temperature offsets, humidity, precipitation
+probabilities), enabling Monte Carlo style analyses rather than relying on single
+deterministic values.
+
 ## Installation
 
 This project uses Python. We recommend using `uv` to manage dependencies in a virtual environment.
