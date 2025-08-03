@@ -74,16 +74,17 @@ def get_model_config() -> Dict[str, Any]:
         d_soil_surf=0.3, d_soil_deep=1.7, k_soil=1.2, SWC_max_mm=150.0,
         soil_stress_threshold_range=(0.3, 0.6), T_deep_boundary=270.0,
         # --- Radiation parameters (Ranged) --------------------------------
-        k_ext_factor_range=(0.5, 0.7), k_snow_factor=0.80, eps_can=0.98,
+        k_ext_factor_range=(0.5, 0.7), k_snow_factor_range=(0.75, 0.85), eps_can=0.98,
         eps_snow=0.98, eps_soil=0.95, eps_trunk=0.95, eps_atm_max=0.9,
         eps_atm_min_T=265.0, eps_atm_sensitivity=15.0, eps_atm_coeff_a=0.80,
         eps_atm_coeff_b=0.15, alpha_snow=0.80, alpha_soil=0.20, alpha_trunk=0.25,
         # --- Forcing parameters (Ranged) ----------------------------------
-        latitude_deg=62.0, T_annual_mean_offset=-8.0, T_seasonal_amplitude=22.0,
-        T_diurnal_amplitude=6.0, T_hour_peak_diurnal=4.0, mean_relative_humidity=0.70,
-        rain_summer_prob=0.15, rain_summer_mm_day_range=(10.0, 20.0),
-        rain_shoulder_prob=0.1, rain_shoulder_mm_day_range=(5.0, 15.0),
-        snow_winter_prob=0.2, winter_snow_mm_day_range=(3.0, 8.0),
+        latitude_deg_range=(56.0, 65.0), T_annual_mean_offset_range=(-10.0, -5.0),
+        T_seasonal_amplitude_range=(20.0, 25.0), T_diurnal_amplitude_range=(4.0, 8.0),
+        T_hour_peak_diurnal_range=(3.0, 5.0), mean_relative_humidity_range=(0.6, 0.8),
+        rain_summer_prob_range=(0.10, 0.20), rain_summer_mm_day_range=(10.0, 20.0),
+        rain_shoulder_prob_range=(0.05, 0.15), rain_shoulder_mm_day_range=(5.0, 15.0),
+        snow_winter_prob_range=(0.15, 0.30), winter_snow_mm_day_range=(3.0, 8.0),
         summer_day_start=150, summer_day_end=250, shoulder_1_start=90,
         shoulder_1_end=150, shoulder_2_start=250, shoulder_2_end=300,
         snow_season_end=120, snow_season_start=280,
@@ -448,14 +449,10 @@ class ForestSimulator:
         for key, value in self.config.items():
             if key.endswith("_range"):
                 sampled_value = self.rng.uniform(low=value[0], high=value[1])
-                # Store the sampled value, removing the "_range" suffix
-                p[key.replace("_range", "")] = sampled_value
+                base_key = key.replace("_range", "")
+                p[base_key] = sampled_value
+                del p[key]
 
-        # Special handling for species-specific params which are not mixed yet
-        p['LAI_max_conifer'] = p.pop('LAI_max_conifer')
-        p['LAI_max_deciduous'] = p.pop('LAI_max_deciduous')
-        p['alpha_can_base_conifer'] = p.pop('alpha_can_base_conifer')
-        p['alpha_can_base_deciduous'] = p.pop('alpha_can_base_deciduous')
         return p
 
     def run_annual_cycle(self, new_conifer_fraction: float, new_stem_density: float) -> dict:
