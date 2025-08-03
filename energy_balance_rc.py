@@ -166,9 +166,26 @@ def get_baseline_parameters(p: Dict, coniferous_fraction: float, stem_density: f
     deciduous_fraction = 1.0 - coniferous_fraction
     u = p['u_ref']
 
-    # --- RL MANAGEMENT LEVER MAPPING ---
+    # ------------------------------------------------------------------
+    # RL MANAGEMENT LEVER MAPPING
+    # ------------------------------------------------------------------
+    # `stem_density` is provided in stems per hectare. Convert to the
+    # model's internal unit of stems per square metre before using it to
+    # derive any geometric properties. 1 ha = 10,000 m^2.
+    stem_density_per_m2 = stem_density / 10_000.0
+    max_density_per_m2 = p['MAX_DENSITY_FOR_FULL_CANOPY'] / 10_000.0
+
     a_can_max_potential = 0.95
-    p['A_can_max'] = np.clip(stem_density / p['MAX_DENSITY_FOR_FULL_CANOPY'], 0.05, 1.0) * a_can_max_potential
+    p['A_can_max'] = (
+        np.clip(stem_density_per_m2 / max_density_per_m2, 0.05, 1.0)
+        * a_can_max_potential
+    )
+
+    # Store the true stem density for later geometric calculations.
+    p['trunk_density_per_m2'] = stem_density_per_m2
+    p['trunk_radius_m'] = np.sqrt(
+        p['A_trunk_plan'] / (p['trunk_density_per_m2'] * np.pi + p['EPS'])
+    )
 
     # --- Mix species-specific parameters based on the coniferous fraction ---
     con_params = dict(
@@ -284,8 +301,6 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float,
     snow_frac = S['SWE'] / (S['SWE'] + p['SWE_SMOOTHING'])
     p["A_snow"] = (1.0 - p["A_trunk_plan"]) * snow_frac
     p["A_soil"] = 1.0 - p["A_trunk_plan"] - p["A_snow"]
-    p['trunk_density_per_m2'] = p['A_can_max']
-    p['trunk_radius_m'] = np.sqrt(p['A_trunk_plan'] / (p['trunk_density_per_m2'] * np.pi + p['EPS']))
 
     # --- Dynamic Aerodynamic conductances ---------------------------------
     u = p['u_ref']
