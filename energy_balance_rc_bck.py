@@ -80,10 +80,10 @@ def get_model_config() -> Dict[str, Any]:
 
         # --- Soil & Water parameters ---------------------------------------
         d_soil_surf=0.3, d_soil_deep=1.7,
-        k_soil=1.2,              # soil thermal conductivity (W m-1 K-1)
-        SWC_max_mm=150.0,
+        k_soil_range=(0.8, 1.6),        # W m-1 K-1; organic to mineral soils
+        SWC_max_mm_range=(100.0, 200.0), # mm; storage from coarse sand to loam
         soil_stress_threshold=0.4,
-        T_deep_boundary=270.0,
+        T_deep_boundary_range=(268.0, 272.0), # K; near-freezing boundary layer
 
         # --- Radiation parameters ------------------------------------------
         k_ext_factor=0.5 * 1.2, # Beer's law extinction coefficient factor
@@ -202,12 +202,13 @@ def get_baseline_parameters(config: Dict, coniferous_fraction: float = 0.0) -> D
     drawing from a base model configuration.
     """
     p = config.copy()
+    for key, val in list(p.items()):
+        if key.endswith('_range'):
+            p[key[:-6]] = np.random.uniform(*val)
+            del p[key]
+
     p['coniferous_fraction'] = coniferous_fraction
     deciduous_fraction = 1.0 - coniferous_fraction
-
-    if 'u_ref_range' in p:
-        p['u_ref'] = np.random.uniform(*p['u_ref_range'])
-        del p['u_ref_range']
 
     u = p['u_ref']  # reference wind (m s⁻¹)
 
@@ -260,7 +261,7 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float)
     p['ea'] = p['mean_relative_humidity'] * esat_kPa(p['T_atm'])
 
     # --- Soil Moisture Stress (depends on a state variable) ---------------------
-    swc_frac = S['SWC_mm'] / p['SWC_max_mm']
+    swc_frac = S['SWC_mm'] / p['SWC_max_mm']  # uses sampled soil water capacity
     stress_range = 1.0 - p['soil_stress_threshold']
     p['soil_stress'] = np.clip((swc_frac - p['soil_stress_threshold']) / stress_range, 0.0, 1.0)
 
@@ -573,8 +574,9 @@ def calculate_fluxes_and_melt(S: Dict, p: Dict) -> Tuple[Dict[str, Dict[str, flo
     flux_report['soil_surf']['LE_evap'] = -LE_soil  # Energy sink
 
     # Soil conduction (surf-deep-boundary)
-    flux_surf_deep = (p['k_soil'] / (0.5*(p['d_soil_surf']+p['d_soil_deep']))) * (T_soil_surf - T_soil_deep)
-    flux_deep_bound = (p['k_soil'] / (0.5*p['d_soil_deep'])) * (T_soil_deep - p['T_deep_boundary'])
+    k_soil = p['k_soil']  # sampled conductivity
+    flux_surf_deep = (k_soil / (0.5*(p['d_soil_surf']+p['d_soil_deep']))) * (T_soil_surf - T_soil_deep)
+    flux_deep_bound = (k_soil / (0.5*p['d_soil_deep'])) * (T_soil_deep - p['T_deep_boundary'])
     flux_report['soil_surf']['Cnd_deep'] = -flux_surf_deep
     flux_report['soil_deep']['Cnd_surf'] = flux_surf_deep
     flux_report['soil_deep']['Cnd_boundary'] = -flux_deep_bound
@@ -582,7 +584,7 @@ def calculate_fluxes_and_melt(S: Dict, p: Dict) -> Tuple[Dict[str, Dict[str, flo
     # Snow-Soil Conduction
     if p['A_snow'] > 0:
         snow_depth = (S['SWE'] * p['RHO_WATER']) / p['RHO_SNOW']
-        R_soil = (0.5 * p['d_soil_surf']) / p['k_soil']
+        R_soil = (0.5 * p['d_soil_surf']) / k_soil
         R_snow = (0.5 * snow_depth) / p['k_snow_pack']
         if (R_soil + R_snow) > 0:
             flux_soil_snow = (1/(R_soil+R_snow)) * p['A_snow'] * (T_soil_surf - T_snow)
