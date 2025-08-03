@@ -70,10 +70,10 @@ def get_model_config() -> Dict[str, Any]:
         tau_adv=3600.0,
 
         # --- Aerodynamic parameters (some ranged) -------------------------
-        z_ref_h=15.0,     # reference height for h_can (m)
-        z0_can=1.5,       # canopy roughness length (m)
-        z_ref_soil=2.0,   # reference height for h_soil (m)
-        z0_soil=0.01,     # soil roughness length (m)
+        z_ref_h=15.0,               # reference height for h_can (m)
+        z0_can_range=(1.0, 2.0),    # canopy roughness length range (m)
+        z_ref_soil=2.0,             # reference height for h_soil (m)
+        z0_soil_range=(0.005, 0.02),# soil roughness length range (m)
         h_trunk_const=5.0,    # constant term for h_trunk
         h_trunk_wind_coeff=4.0, # wind coefficient for h_trunk
         u_ref_range=(1.0, 5.0),
@@ -208,6 +208,14 @@ def get_baseline_parameters(config: Dict, coniferous_fraction: float = 0.0) -> D
     if 'u_ref_range' in p:
         p['u_ref'] = np.random.uniform(*p['u_ref_range'])
         del p['u_ref_range']
+
+    # Sample roughness lengths if ranges are provided
+    if 'z0_can_range' in p:
+        p['z0_can'] = np.random.uniform(*p['z0_can_range'])
+        del p['z0_can_range']
+    if 'z0_soil_range' in p:
+        p['z0_soil'] = np.random.uniform(*p['z0_soil_range'])
+        del p['z0_soil_range']
 
     u = p['u_ref']  # reference wind (m s⁻¹)
 
