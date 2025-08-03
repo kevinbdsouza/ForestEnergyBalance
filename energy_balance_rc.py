@@ -92,6 +92,7 @@ def get_model_config() -> Dict[str, Any]:
         summer_day_start=150, summer_day_end=250, shoulder_1_start=90,
         shoulder_1_end=150, shoulder_2_start=250, shoulder_2_end=300,
         snow_season_end=120, snow_season_start=280,
+        T_daily_noise_std_range=(1.0, 2.0),  # Daily temperature noise std dev (K)
         # --- Phenology (Fixed) --------------------------------------------
         growth_day=140, fall_day=270, growth_rate=0.1, fall_rate=0.1,
         woody_area_index=0.35,
@@ -190,7 +191,7 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float,
     # --- Air temperature: annual + diurnal + STOCHASTIC offset --------------
     day_angle = 2 * np.pi * (day - 1) / 365.0
     p["T_large_scale"] = 273.15 + p['T_annual_mean_offset'] - p['T_seasonal_amplitude'] * np.cos(day_angle) \
-                         + rng.normal(0, 1.5) # Daily stochastic temp
+                         + rng.normal(0, p['T_daily_noise_std'])  # Daily stochastic temp
     p["T_atm"] = p["T_large_scale"] - p['T_diurnal_amplitude'] * np.cos(2 * np.pi * (hour - p['T_hour_peak_diurnal']) / 24.0)
     p['ea'] = p['mean_relative_humidity'] * esat_kPa(p['T_atm'])
     swc_frac = S['SWC_mm'] / p['SWC_max_mm']  # uses sampled soil water capacity

@@ -42,6 +42,10 @@ samples within these ranges (e.g., temperature offsets, humidity, precipitation
 probabilities), enabling Monte Carlo style analyses rather than relying on single
 deterministic values.
 
+One such parameter is `T_daily_noise_std`, which sets the standard deviation (K)
+for daily stochastic temperature forcing. A suggested range of 1–2 K captures
+typical day-to-day variability.
+
 Recent updates extend this approach to key soil parameters:
 
 * **`k_soil_range` (0.8–1.6 W m⁻¹ K⁻¹):** captures thermal conductivity from
