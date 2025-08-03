@@ -67,6 +67,7 @@ class ForestEnv(gym.Env):
 
     def __init__(self, config: dict | None = None):
         super().__init__()
+        print("--- ForestEnv.__init__ called ---")
 
         self.config = config if config is not None else {}
 
@@ -79,7 +80,7 @@ class ForestEnv(gym.Env):
         # Observation space: [year, norm_density, mix_fraction, norm_carbon_stock]
         self.observation_space = spaces.Box(
             low=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            high=np.array([1.0, 1.0, 1.0, 5.0], dtype=np.float32), # Carbon stock can exceed 1
+            high=np.array([1.0, 1.0, 1.0, 1.5], dtype=np.float32), # Max plausible carbon ~75kg/m2
             dtype=np.float32
         )
 
@@ -92,6 +93,7 @@ class ForestEnv(gym.Env):
         self.cumulative_thaw_dd = 0.0
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
+        print("--- ForestEnv.reset called ---")
         super().reset(seed=seed)
 
         # --- Initialize Forest State ---
@@ -110,23 +112,28 @@ class ForestEnv(gym.Env):
             weather_seed=self.np_random.integers(0, 2**31 - 1)
         )
 
+        print("--- ForestEnv.reset finished ---")
         return self._get_obs(), self._get_info()
 
     def step(self, action: np.ndarray):
+        print(f"--- ForestEnv.step called (Year: {self.year}) ---")
         # 1. Decode action and update management state
         density_action_idx, mix_action_idx = action
         delta_density = self.DENSITY_ACTIONS[density_action_idx]
         delta_mix = self.MIX_ACTIONS[mix_action_idx]
 
         # Apply thinning/planting
-        new_density = self.stem_density + delta_density
-        # Track carbon loss from thinning
-        carbon_loss_thinning = 0
-        if new_density < self.stem_density:
-             # Assume thinning removes a proportional amount of carbon stock
-             carbon_loss_thinning = self.carbon_stock_kg_m2 * (self.stem_density - new_density) / self.stem_density
+        old_density = self.stem_density
+        new_density_unclipped = self.stem_density + delta_density
+        self.stem_density = np.clip(new_density_unclipped, self.MIN_STEMS_HA, self.MAX_STEMS_HA)
 
-        self.stem_density = np.clip(new_density, self.MIN_STEMS_HA, self.MAX_STEMS_HA)
+        # Track carbon loss from thinning, based on the *actual* change in density
+        carbon_loss_thinning = 0
+        if self.stem_density < old_density:
+            # Thinning occurred, calculate carbon loss proportionally
+            # Use old_density in denominator to avoid division by zero if forest is cleared
+            carbon_loss_thinning = self.carbon_stock_kg_m2 * (old_density - self.stem_density) / old_density
+
         self.carbon_stock_kg_m2 -= carbon_loss_thinning
 
         # Apply species mix change
@@ -135,9 +142,11 @@ class ForestEnv(gym.Env):
         # 2. Run the physical simulation for one year
         # This is the main call to the modified energy_balance_rc module.
         # The simulator is updated with the new density and mix from the action.
+        # We also pass the current carbon stock to ensure the simulator is stateless.
         annual_results = self.simulator.run_annual_cycle(
             new_conifer_fraction=self.conifer_fraction,
-            new_stem_density=self.stem_density
+            new_stem_density=self.stem_density,
+            current_carbon_stock_kg_m2=self.carbon_stock_kg_m2
         )
         ΔC_year = annual_results['delta_carbon_kg_m2']
         thaw_dd_year = annual_results['thaw_degree_days']
@@ -155,6 +164,7 @@ class ForestEnv(gym.Env):
         terminated = self.year >= self.EPISODE_LENGTH_YEARS
         truncated = False # Not using time limits other than episode end
 
+        print(f"--- ForestEnv.step finished (Year: {self.year}) ---")
         return self._get_obs(), reward, terminated, truncated, self._get_info()
 
     def _get_obs(self):
@@ -184,17 +194,20 @@ class ForestEnv(gym.Env):
         pass
 
 # --- Training Script ---
-def train(total_timesteps=200_000, n_envs=4):
+def train(total_timesteps=200_000, n_envs=1):
     """
     A helper function to instantiate the environment and train a PPO agent.
     """
+    print("--- train function called ---")
     print("Checking environment...")
     # Check the environment to ensure it follows the Gym API.
     check_env(ForestEnv())
     print("Environment check passed.")
 
+    print("--- Creating vectorized environment ---")
     # Vectorized environments for parallel training
     venv = make_vec_env(ForestEnv, n_envs=n_envs, seed=42)
+    print("--- Vectorized environment created ---")
 
     # PPO agent
     # The hyperparameters are chosen as a starting point and may need tuning.
@@ -214,8 +227,9 @@ def train(total_timesteps=200_000, n_envs=4):
         tensorboard_log="./ppo_forest_tensorboard/"
     )
 
-    print("Starting training...")
+    print("--- Starting model.learn ---")
     model.learn(total_timesteps=total_timesteps, progress_bar=True)
+    print("--- Finished model.learn ---")
     model.save("ppo_forest_manager")
     venv.close()
     print("Training complete. Model saved to 'ppo_forest_manager.zip'")
