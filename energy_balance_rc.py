@@ -72,8 +72,11 @@ def get_model_config() -> Dict[str, Any]:
         h_trunk_const=5.0, h_trunk_wind_coeff=4.0,
         u_ref_range=(1.0, 5.0),
         # --- Soil & Water parameters ( 일부는 범위로 지정) --------------------
-        d_soil_surf=0.3, d_soil_deep=1.7, k_soil=1.2, SWC_max_mm=150.0,
-        soil_stress_threshold_range=(0.3, 0.6), T_deep_boundary=270.0,
+        d_soil_surf=0.3, d_soil_deep=1.7,
+        k_soil_range=(0.8, 1.6),       # Soil thermal conductivity (organic→mineral)
+        SWC_max_mm_range=(100.0, 200.0), # Soil water capacity (coarse→loamy)
+        soil_stress_threshold_range=(0.3, 0.6),
+        T_deep_boundary_range=(268.0, 272.0), # Deep soil boundary temperature (K)
         # --- Radiation parameters (Ranged) --------------------------------
         k_ext_factor_range=(0.5, 0.7), k_snow_factor_range=(0.75, 0.85), eps_can=0.98,
         eps_snow=0.98, eps_soil=0.95, eps_trunk=0.95, eps_atm_max=0.9,
@@ -190,7 +193,7 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float,
                          + rng.normal(0, 1.5) # Daily stochastic temp
     p["T_atm"] = p["T_large_scale"] - p['T_diurnal_amplitude'] * np.cos(2 * np.pi * (hour - p['T_hour_peak_diurnal']) / 24.0)
     p['ea'] = p['mean_relative_humidity'] * esat_kPa(p['T_atm'])
-    swc_frac = S['SWC_mm'] / p['SWC_max_mm']
+    swc_frac = S['SWC_mm'] / p['SWC_max_mm']  # uses sampled soil water capacity
     stress_range = 1.0 - p['soil_stress_threshold']
     p['soil_stress'] = np.clip((swc_frac - p['soil_stress_threshold']) / stress_range, 0.0, 1.0)
 
@@ -368,15 +371,16 @@ def calculate_fluxes_and_melt(S: Dict, p: Dict) -> Tuple[Dict, float, float, flo
         LE_soil = p['PT_ALPHA'] * (Delta_soil / (Delta_soil + p['PSYCHROMETRIC_GAMMA'])) * Rn_soil * p['soil_stress']
     flux_report['soil_surf']['LE_evap'] = -LE_soil
 
-    flux_surf_deep = (p['k_soil'] / (0.5*(p['d_soil_surf']+p['d_soil_deep']))) * (T_soil_surf - T_soil_deep)
-    flux_deep_bound = (p['k_soil'] / (0.5*p['d_soil_deep'])) * (T_soil_deep - p['T_deep_boundary'])
+    k_soil = p['k_soil']  # sampled soil thermal conductivity
+    flux_surf_deep = (k_soil / (0.5*(p['d_soil_surf']+p['d_soil_deep']))) * (T_soil_surf - T_soil_deep)
+    flux_deep_bound = (k_soil / (0.5*p['d_soil_deep'])) * (T_soil_deep - p['T_deep_boundary'])
     flux_report['soil_surf']['Cnd_deep'] = -flux_surf_deep
     flux_report['soil_deep']['Cnd_surf'] = flux_surf_deep
     flux_report['soil_deep']['Cnd_boundary'] = -flux_deep_bound
 
     if p['A_snow'] > 0:
         snow_depth = (S['SWE'] * p['RHO_WATER']) / p['RHO_SNOW']
-        R_soil = (0.5 * p['d_soil_surf']) / p['k_soil']
+        R_soil = (0.5 * p['d_soil_surf']) / k_soil
         R_snow = (0.5 * snow_depth) / p['k_snow_pack']
         flux_soil_snow = (1/(R_soil+R_snow)) * p['A_snow'] * (T_soil_surf - T_snow) if (R_soil+R_snow) > 0 else 0.0
         flux_report['soil_surf']['Cnd_snow'] = -flux_soil_snow
