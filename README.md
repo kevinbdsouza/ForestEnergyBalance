@@ -34,9 +34,47 @@ This model version (V4.3) includes several important features that enhance its r
 3.  **Aerodynamic Conductance:** Bulk aerodynamic conductances are calculated with a Monin-Obukhov stability correction.
 4.  **Dynamic Properties:** Many parameters, such as albedo, emissivity, and interception fractions, are updated dynamically based on the state of the system (e.g., LAI, snow cover).
 
+## Installation
+
+This project uses Python. We recommend using `uv` to manage dependencies in a virtual environment.
+
+1.  **Install `uv`**
+
+    If you don't have it, install `uv` by following the [official instructions](https://github.com/astral-sh/uv#installation). For example, on macOS or Linux:
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+
+2.  **Create and Activate the Virtual Environment**
+
+    From the root of the repository, create and activate a new virtual environment:
+    ```bash
+    uv venv
+    source .venv/bin/activate
+    ```
+
+3.  **Install Dependencies**
+
+    With the virtual environment active, install the required packages from `requirements.txt`:
+    ```bash
+    uv pip install -r requirements.txt
+    ```
+
 ## How to Run
 
-The script can be run directly from the command line:
+The `rl_forest.py` script is the main entrypoint for training or evaluating the reinforcement learning agent.
+
+**To train a new model:**
+```bash
+python rl_forest.py --train --timesteps 200000
+```
+
+**To evaluate a pre-trained model:**
+```bash
+python rl_forest.py --evaluate --model_path ppo_forest_manager.zip
+```
+
+The original `energy_balance_rc.py` script can be run as a standalone test to check the output of the physical simulator for a single year:
 
 ```bash
 python energy_balance_rc.py
