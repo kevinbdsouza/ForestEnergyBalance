@@ -67,9 +67,10 @@ def get_model_config() -> Dict[str, Any]:
         # --- Misc. stability guards & model params (Fixed) ----------------
         T_MIN=180.0, T_MAX=330.0, DT_CLIP=15.0, SWE_SMOOTHING=0.01,
         CANOPY_MIN_H=10.0, H_atm=100.0, tau_adv=3600.0,
-        # --- Aerodynamic parameters (Fixed) -------------------------------
+        # --- Aerodynamic parameters (some ranged) ------------------------
         z_ref_h=15.0, z0_can=1.5, z_ref_soil=2.0, z0_soil=0.01,
         h_trunk_const=5.0, h_trunk_wind_coeff=4.0,
+        u_ref_range=(1.0, 5.0),
         # --- Soil & Water parameters ( 일부는 범위로 지정) --------------------
         d_soil_surf=0.3, d_soil_deep=1.7, k_soil=1.2, SWC_max_mm=150.0,
         soil_stress_threshold_range=(0.3, 0.6), T_deep_boundary=270.0,
@@ -147,7 +148,7 @@ def get_baseline_parameters(p: Dict, coniferous_fraction: float, stem_density: f
     """
     p['coniferous_fraction'] = coniferous_fraction
     deciduous_fraction = 1.0 - coniferous_fraction
-    u = 2.0
+    u = p['u_ref']
 
     # --- RL MANAGEMENT LEVER MAPPING ---
     a_can_max_potential = 0.95
@@ -241,7 +242,7 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float,
     p['trunk_radius_m'] = np.sqrt(p['A_trunk_plan'] / (p['trunk_density_per_m2'] * np.pi + p['EPS']))
 
     # --- Dynamic Aerodynamic conductances ---------------------------------
-    u = 2.0
+    u = p['u_ref']
     p['h_can'] = max(h_aero(u, p['z_ref_h'], p['z0_can'], L, p), p['CANOPY_MIN_H'])
     h_soil_raw = h_aero(u, p['z_ref_soil'], p['z0_soil'], L, p)
     p['h_soil'] = max(h_soil_raw, 3.0) * (1 - snow_frac)
@@ -506,7 +507,7 @@ class ForestSimulator:
 
                 H_total = sum(flux['atm_model'].get(k, 0.0) for k in ['H_can', 'H_trunk', 'H_soil', 'H_snow'])
                 if abs(H_total) > 1e-3:
-                    u = 2.0
+                    u = self.p['u_ref']
                     psi_m, _ = get_stability_correction(self.p['z_ref_h'], self.L_stability)
                     u_star_log_term = np.log(self.p['z_ref_h'] / self.p['z0_can']) - psi_m
                     u_star = u * self.p['KAPPA'] / u_star_log_term if u_star_log_term > 0 else 0.1
