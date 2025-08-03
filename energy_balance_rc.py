@@ -25,7 +25,10 @@ Key changes:
     *   Ecosystem Respiration (`R_eco`) is modeled using a Q10 temperature
         response function.
     *   Net Ecosystem Exchange (NEE) is `GPP - R_eco`.
-5.  **Management Levers**: The simulator now accepts `stem_density` and
+5.  **Permafrost Thaw**: Thaw degree days are calculated using energy flux to the
+    deep boundary (permafrost layer), providing a more physically meaningful
+    measure of permafrost degradation than surface temperature alone.
+6.  **Management Levers**: The simulator now accepts `stem_density` and
     `conifer_fraction` as inputs, which directly influence the physical
     parameters of the forest model (e.g., `A_can_max`, `LAI_max`).
 """
@@ -546,8 +549,9 @@ class ForestSimulator:
 
         return p
 
-    def run_annual_cycle(self, new_conifer_fraction: float, new_stem_density: float, current_carbon_stock_kg_m2: float) -> dict:
-        total_gpp_kg_m2, total_reco_kg_m2, total_thaw_degree_days = 0.0, 0.0, 0.0
+    def run_annual_cycle(self, new_conifer_fraction: float, new_stem_density: float, 
+                        current_biomass_carbon_kg_m2: float, current_soil_carbon_kg_m2: float) -> dict:
+        total_gpp_kg_m2, total_autotrophic_resp_kg_m2, total_soil_resp_kg_m2, total_thaw_degree_days = 0.0, 0.0, 0.0, 0.0
         self.p = get_baseline_parameters(
             self.p, new_conifer_fraction, new_stem_density, self.rng
         )
@@ -573,18 +577,20 @@ class ForestSimulator:
                 total_gpp_kg_m2 += gpp_kg_m2_step
 
                 # Autotrophic respiration scales with above-ground biomass
+                biomass_factor = max(current_biomass_carbon_kg_m2 / 15.0, 0.1)  # Prevent division by zero
                 r_auto_kg_m2_yr = (
                     self.p['R_BASE_KG_M2_YR']
-                    * (current_biomass_carbon_kg_m2 / 15.0)
+                    * biomass_factor
                     * self.p['Q10'] ** ((self.S['soil_surf'] - self.p['T_REF_K']) / 10.0)
                 )
                 auto_resp_step = r_auto_kg_m2_yr / (365 * self.p['STEPS_PER_DAY'])
                 total_autotrophic_resp_kg_m2 += auto_resp_step
 
                 # Heterotrophic respiration scales with soil carbon
+                soil_factor = max(current_soil_carbon_kg_m2 / 15.0, 0.1)  # Prevent division by zero
                 r_soil_kg_m2_yr = (
                     self.p['R_BASE_KG_M2_YR']
-                    * (current_soil_carbon_kg_m2 / 15.0)
+                    * soil_factor
                     * self.p['Q10'] ** ((self.S['soil_surf'] - self.p['T_REF_K']) / 10.0)
                 )
                 soil_resp_step = r_soil_kg_m2_yr / (365 * self.p['STEPS_PER_DAY'])
@@ -609,8 +615,24 @@ class ForestSimulator:
                     dT = (net_flux / heat_caps[node]) * self.p['DT_SECONDS'] if heat_caps.get(node, 0) > 0 else 0.0
                     self.S[node] = safe_update(self.S[node], dT, self.p) if node != 'canopy' else flux['canopy']['T_new']
 
-                if self.S['soil_surf'] > 273.15:
-                    total_thaw_degree_days += (self.S['soil_surf'] - 273.15) / self.p['STEPS_PER_DAY']
+                # Calculate thaw degree days using flux to deep boundary (more physically meaningful)
+                # Get the energy flux from deep soil to permafrost boundary
+                flux_deep_bound = flux['soil_deep'].get('Cnd_boundary', 0.0)
+                
+                # Only count positive fluxes (energy entering permafrost = thawing)
+                # Convert energy flux to thaw degree days equivalent
+                if flux_deep_bound > 0:
+                    # Energy flux in W/m², convert to J/m² per timestep
+                    thaw_energy_per_timestep = flux_deep_bound * self.p['DT_SECONDS']  # J/m²
+                    
+                    # Convert to thaw degree days equivalent
+                    # Use total soil heat capacity (surface + deep layers) for normalization
+                    # This gives us the temperature equivalent of the energy flux
+                    total_soil_heat_capacity = self.p['C_SOIL_TOTAL']  # J/m²/K
+                    thaw_temp_equivalent = thaw_energy_per_timestep / total_soil_heat_capacity  # K
+                    
+                    # Accumulate as thaw degree days (normalized by steps per day)
+                    total_thaw_degree_days += thaw_temp_equivalent / self.p['STEPS_PER_DAY']
 
                 H_total = sum(flux['atm_model'].get(k, 0.0) for k in ['H_can', 'H_trunk', 'H_soil', 'H_snow'])
                 if abs(H_total) > 1e-3:

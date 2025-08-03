@@ -15,12 +15,14 @@ def test_reproducible_episode():
     res1 = sim1.run_annual_cycle(
         new_conifer_fraction=params["coniferous_fraction"],
         new_stem_density=params["stem_density"],
-        current_carbon_stock_kg_m2=params["carbon_stock_kg_m2"],
+        current_biomass_carbon_kg_m2=params["carbon_stock_kg_m2"] * 0.7,  # Assume 70% biomass, 30% soil
+        current_soil_carbon_kg_m2=params["carbon_stock_kg_m2"] * 0.3,
     )
     res2 = sim2.run_annual_cycle(
         new_conifer_fraction=params["coniferous_fraction"],
         new_stem_density=params["stem_density"],
-        current_carbon_stock_kg_m2=params["carbon_stock_kg_m2"],
+        current_biomass_carbon_kg_m2=params["carbon_stock_kg_m2"] * 0.7,  # Assume 70% biomass, 30% soil
+        current_soil_carbon_kg_m2=params["carbon_stock_kg_m2"] * 0.3,
     )
 
     for key in res1:

@@ -51,7 +51,7 @@ class ForestEnv(gym.Env):
     metadata = {'render_modes': []}
 
     # --- Constants ---
-    EPISODE_LENGTH_YEARS = 30
+    EPISODE_LENGTH_YEARS = 50
     MIN_STEMS_HA = 100
     MAX_STEMS_HA = 2500
 
@@ -80,7 +80,7 @@ class ForestEnv(gym.Env):
         # Observation space: [year, norm_density, mix_fraction, norm_carbon_stock]
         self.observation_space = spaces.Box(
             low=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            high=np.array([1.0, 1.0, 1.0, 1.5], dtype=np.float32), # Max plausible carbon ~75kg/m2
+            high=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32), # Max carbon ~50kg/m2 (more realistic for current model)
             dtype=np.float32
         )
 
@@ -105,6 +105,12 @@ class ForestEnv(gym.Env):
         self.biomass_carbon_kg_m2 = 10.0
         self.soil_carbon_kg_m2 = 5.0
         self.cumulative_thaw_dd = 0.0
+        
+        # Validate initial state
+        assert self.stem_density >= self.MIN_STEMS_HA, f"Initial stem density {self.stem_density} below minimum {self.MIN_STEMS_HA}"
+        assert 0.0 <= self.conifer_fraction <= 1.0, f"Invalid conifer fraction: {self.conifer_fraction}"
+        assert self.biomass_carbon_kg_m2 >= 0.0, f"Negative biomass carbon: {self.biomass_carbon_kg_m2}"
+        assert self.soil_carbon_kg_m2 >= 0.0, f"Negative soil carbon: {self.soil_carbon_kg_m2}"
 
         # --- Initialize Simulator for a New Monte-Carlo Episode ---
         # The simulator is instantiated with a new random seed for weather.
@@ -119,59 +125,79 @@ class ForestEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         print(f"--- ForestEnv.step called (Year: {self.year}) ---")
-        # 1. Decode action and update management state
-        density_action_idx, mix_action_idx = action
-        delta_density = self.DENSITY_ACTIONS[density_action_idx]
-        delta_mix = self.MIX_ACTIONS[mix_action_idx]
+        
+        try:
+            # 1. Decode action and update management state
+            density_action_idx, mix_action_idx = action
+            delta_density = self.DENSITY_ACTIONS[density_action_idx]
+            delta_mix = self.MIX_ACTIONS[mix_action_idx]
 
-        # Apply thinning/planting
-        old_density = self.stem_density
-        new_density_unclipped = self.stem_density + delta_density
-        self.stem_density = np.clip(new_density_unclipped, self.MIN_STEMS_HA, self.MAX_STEMS_HA)
+            # Apply thinning/planting
+            old_density = self.stem_density
+            new_density_unclipped = self.stem_density + delta_density
+            self.stem_density = np.clip(new_density_unclipped, self.MIN_STEMS_HA, self.MAX_STEMS_HA)
 
-        # Track carbon loss from thinning, based on the *actual* change in density
-        carbon_loss_thinning = 0
-        if self.stem_density < old_density:
-            # Thinning occurred, calculate carbon loss proportionally (above-ground biomass only)
-            # Use old_density in denominator to avoid division by zero if forest is cleared
-            carbon_loss_thinning = self.biomass_carbon_kg_m2 * (old_density - self.stem_density) / old_density
+            # Track carbon loss from thinning, based on the *actual* change in density
+            carbon_loss_thinning = 0
+            if self.stem_density < old_density:
+                # Thinning occurred, calculate carbon loss proportionally (above-ground biomass only)
+                # Use old_density in denominator to avoid division by zero if forest is cleared
+                carbon_loss_thinning = self.biomass_carbon_kg_m2 * (old_density - self.stem_density) / old_density
 
-        self.biomass_carbon_kg_m2 -= carbon_loss_thinning
+            # Ensure carbon pools never go negative
+            self.biomass_carbon_kg_m2 = max(0.0, self.biomass_carbon_kg_m2 - carbon_loss_thinning)
 
-        # Apply species mix change
-        self.conifer_fraction = np.clip(self.conifer_fraction + delta_mix, 0.0, 1.0)
+            # Apply species mix change
+            self.conifer_fraction = np.clip(self.conifer_fraction + delta_mix, 0.0, 1.0)
 
-        # 2. Run the physical simulation for one year
-        # This is the main call to the modified energy_balance_rc module.
-        # The simulator is updated with the new density and mix from the action.
-        # We also pass the current carbon stock to ensure the simulator is stateless.
-        annual_results = self.simulator.run_annual_cycle(
-            new_conifer_fraction=self.conifer_fraction,
-            new_stem_density=self.stem_density,
-            current_biomass_carbon_kg_m2=self.biomass_carbon_kg_m2,
-            current_soil_carbon_kg_m2=self.soil_carbon_kg_m2,
-        )
-        ΔC_biomass = annual_results['delta_biomass_carbon_kg_m2']
-        ΔC_soil = annual_results['delta_soil_carbon_kg_m2']
-        thaw_dd_year = annual_results['thaw_degree_days']
+            # 2. Run the physical simulation for one year
+            # This is the main call to the modified energy_balance_rc module.
+            # The simulator is updated with the new density and mix from the action.
+            # We also pass the current carbon stock to ensure the simulator is stateless.
+            annual_results = self.simulator.run_annual_cycle(
+                new_conifer_fraction=self.conifer_fraction,
+                new_stem_density=self.stem_density,
+                current_biomass_carbon_kg_m2=self.biomass_carbon_kg_m2,
+                current_soil_carbon_kg_m2=self.soil_carbon_kg_m2,
+            )
+            ΔC_biomass = annual_results['delta_biomass_carbon_kg_m2']
+            ΔC_soil = annual_results['delta_soil_carbon_kg_m2']
+            thaw_dd_year = annual_results['thaw_degree_days']
 
-        self.biomass_carbon_kg_m2 += ΔC_biomass
-        self.soil_carbon_kg_m2 += ΔC_soil
-        ΔC_year = ΔC_biomass + ΔC_soil
-        self.cumulative_thaw_dd += thaw_dd_year
+            # Update carbon pools and ensure they never go negative
+            self.biomass_carbon_kg_m2 = max(0.0, self.biomass_carbon_kg_m2 + ΔC_biomass)
+            self.soil_carbon_kg_m2 = max(0.0, self.soil_carbon_kg_m2 + ΔC_soil)
+            ΔC_year = ΔC_biomass + ΔC_soil
+            self.cumulative_thaw_dd += thaw_dd_year
 
-        # 3. Calculate reward
-        reward_carbon = self.W_CARBON * ΔC_year
-        penalty_thaw = self.W_THAW * thaw_dd_year
-        reward = reward_carbon - penalty_thaw
+            # 3. Calculate reward
+            reward_carbon = self.W_CARBON * ΔC_year
+            penalty_thaw = self.W_THAW * thaw_dd_year
+            reward = reward_carbon - penalty_thaw
 
-        # 4. Update state and check for termination
-        self.year += 1
-        terminated = self.year >= self.EPISODE_LENGTH_YEARS
-        truncated = False # Not using time limits other than episode end
+            # 4. Update state and check for termination
+            self.year += 1
+            
+            # Check for early termination due to ecological constraints
+            total_carbon = self.biomass_carbon_kg_m2 + self.soil_carbon_kg_m2
+            terminated = (
+                self.year >= self.EPISODE_LENGTH_YEARS or  # Normal episode end
+                total_carbon < 1.0 or  # Carbon stocks too low (ecological failure)
+                self.stem_density < self.MIN_STEMS_HA  # Forest density too low
+            )
+            truncated = False # Not using time limits other than episode end
+            
+            # Add penalty for early termination due to ecological failure
+            if terminated and self.year < self.EPISODE_LENGTH_YEARS:
+                reward -= 10.0  # Significant penalty for ecological failure
 
-        print(f"--- ForestEnv.step finished (Year: {self.year}) ---")
-        return self._get_obs(), reward, terminated, truncated, self._get_info()
+            print(f"--- ForestEnv.step finished (Year: {self.year}) ---")
+            return self._get_obs(), reward, terminated, truncated, self._get_info()
+            
+        except Exception as e:
+            print(f"Error in ForestEnv.step: {e}")
+            # Return a safe default state and large negative reward
+            return self._get_obs(), -100.0, True, False, self._get_info()
 
     def _get_obs(self):
         norm_year = self.year / self.EPISODE_LENGTH_YEARS
@@ -180,12 +206,15 @@ class ForestEnv(gym.Env):
         total_carbon = self.biomass_carbon_kg_m2 + self.soil_carbon_kg_m2
         norm_carbon = total_carbon / 50.0
 
-        return np.array([
-            norm_year,
-            norm_density,
-            self.conifer_fraction,
-            norm_carbon
+        # Ensure observations are within bounds
+        obs = np.array([
+            np.clip(norm_year, 0.0, 1.0),
+            np.clip(norm_density, 0.0, 1.0),
+            np.clip(self.conifer_fraction, 0.0, 1.0),
+            np.clip(norm_carbon, 0.0, 1.0)
         ], dtype=np.float32)
+        
+        return obs
 
     def _get_info(self):
         total_carbon = self.biomass_carbon_kg_m2 + self.soil_carbon_kg_m2
@@ -208,11 +237,17 @@ def train(total_timesteps=200_000, n_envs=1):
     """
     A helper function to instantiate the environment and train a PPO agent.
     """
+    from stable_baselines3.common.env_util import make_vec_env
+    
     print("--- train function called ---")
     print("Checking environment...")
     # Check the environment to ensure it follows the Gym API.
-    check_env(ForestEnv())
-    print("Environment check passed.")
+    try:
+        check_env(ForestEnv())
+        print("Environment check passed.")
+    except Exception as e:
+        print(f"Environment validation failed: {e}")
+        raise
 
     print("--- Creating vectorized environment ---")
     # Vectorized environments for parallel training
@@ -247,7 +282,6 @@ def train(total_timesteps=200_000, n_envs=1):
 
 import argparse
 from tqdm import tqdm
-from stable_baselines3.common.env_util import make_vec_env
 
 
 def evaluate_policy(model_path="ppo_forest_manager.zip", n_eval_episodes=1000):
