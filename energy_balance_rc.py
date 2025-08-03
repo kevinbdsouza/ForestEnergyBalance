@@ -353,6 +353,12 @@ def calculate_fluxes_and_melt(S: Dict, p: Dict) -> Tuple[Dict, float, float, flo
     flux_report['soil_surf']['LW_net'] = LW_in_soil - A_soil * L_emit_soil
     flux_report['snow']['LW_net'] = LW_in_snow - A_snow * L_emit_snow
 
+    # Ensure conduction terms are always present for downstream accounting
+    flux_report['snow']['Cnd_soil'] = 0.0
+    flux_report['snow']['Cnd_trunk'] = 0.0
+    flux_report['soil_surf']['Cnd_snow'] = 0.0
+    flux_report['soil_surf']['Cnd_trunk'] = 0.0
+
     Rn_soil = flux_report['soil_surf']['SW_in'] + flux_report['soil_surf']['LW_net']
     LE_soil = 0.0
     if Rn_soil > 0 and A_soil > 0:
@@ -368,7 +374,8 @@ def calculate_fluxes_and_melt(S: Dict, p: Dict) -> Tuple[Dict, float, float, flo
 
     if p['A_snow'] > 0:
         snow_depth = (S['SWE'] * p['RHO_WATER']) / p['RHO_SNOW']
-        R_soil, R_snow = (0.5 * p['d_soil_surf']) / p['k_soil'], (0.5 * snow_depth) / p['k_snow_pack']
+        R_soil = (0.5 * p['d_soil_surf']) / p['k_soil']
+        R_snow = (0.5 * snow_depth) / p['k_snow_pack']
         flux_soil_snow = (1/(R_soil+R_snow)) * p['A_snow'] * (T_soil_surf - T_snow) if (R_soil+R_snow) > 0 else 0.0
         flux_report['soil_surf']['Cnd_snow'] = -flux_soil_snow
         flux_report['snow']['Cnd_soil'] = flux_soil_snow
@@ -376,6 +383,9 @@ def calculate_fluxes_and_melt(S: Dict, p: Dict) -> Tuple[Dict, float, float, flo
     H_trunk, H_soil, H_snow = p['h_trunk'] * (T_trunk - T_air_model), p['h_soil'] * (T_soil_surf - T_air_model), p['h_snow'] * (T_snow - T_air_model)
     flux_report['trunk']['H'], flux_report['soil_surf']['H'], flux_report['snow']['H'] = -H_trunk, -H_soil, -H_snow
     flux_report['atm_model']['H_can'], flux_report['atm_model']['H_trunk'], flux_report['atm_model']['H_soil'], flux_report['atm_model']['H_snow'] = flux_report['canopy']['H'], H_trunk, H_soil, H_snow
+
+    LW_ground_to_atm = (gap_fraction * L_up_ground) + (A_can * (1 - eps_can) * L_up_ground)
+    flux_report['atm_model']['LW_up'] = LW_ground_to_atm
 
     flux_report['atm_model']['Relax'] = (p['C_ATM']/p['tau_adv']) * (p['T_large_scale'] - T_air_model)
     flux_report['trunk']['Cnd_canopy'] = -flux_report['canopy']['Cnd_trunk']
