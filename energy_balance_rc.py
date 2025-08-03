@@ -511,7 +511,7 @@ def calculate_fluxes_and_melt(S: Dict, p: Dict) -> Tuple[Dict, float, float, flo
 # THE SIMULATOR CLASS FOR RL
 # ----------------------------------------------------------------------------------
 class ForestSimulator:
-    def __init__(self, coniferous_fraction: float, stem_density: float, carbon_stock_kg_m2: float, weather_seed: int):
+    def __init__(self, coniferous_fraction: float, stem_density: float, weather_seed: int):
         self.rng = np.random.default_rng(weather_seed)
         self.config = get_model_config()
 
@@ -528,7 +528,6 @@ class ForestSimulator:
             "soil_deep": 270.0, "atm_model": 265.0, "SWE": 0.0, "SWE_can": 0.0,
             "SWC_mm": self.p['SWC_max_mm'] * 0.75,
         }
-        self.carbon_stock_kg_m2 = carbon_stock_kg_m2
         self.L_stability = 1e6
 
     def _sample_parameters(self) -> Dict[str, Any]:
@@ -573,11 +572,23 @@ class ForestSimulator:
                 gpp_kg_m2_step = gpp_g_m2_s * 1e-3 * self.p['DT_SECONDS']
                 total_gpp_kg_m2 += gpp_kg_m2_step
 
-                # Use the carbon stock passed from the environment for respiration calculation
-                r_eco_kg_m2_yr = self.p['R_BASE_KG_M2_YR'] * (current_carbon_stock_kg_m2 / 15.0) * \
-                                 self.p['Q10']**((self.S['soil_surf'] - self.p['T_REF_K']) / 10.0)
-                reco_kg_m2_step = r_eco_kg_m2_yr / (365 * self.p['STEPS_PER_DAY'])
-                total_reco_kg_m2 += reco_kg_m2_step
+                # Autotrophic respiration scales with above-ground biomass
+                r_auto_kg_m2_yr = (
+                    self.p['R_BASE_KG_M2_YR']
+                    * (current_biomass_carbon_kg_m2 / 15.0)
+                    * self.p['Q10'] ** ((self.S['soil_surf'] - self.p['T_REF_K']) / 10.0)
+                )
+                auto_resp_step = r_auto_kg_m2_yr / (365 * self.p['STEPS_PER_DAY'])
+                total_autotrophic_resp_kg_m2 += auto_resp_step
+
+                # Heterotrophic respiration scales with soil carbon
+                r_soil_kg_m2_yr = (
+                    self.p['R_BASE_KG_M2_YR']
+                    * (current_soil_carbon_kg_m2 / 15.0)
+                    * self.p['Q10'] ** ((self.S['soil_surf'] - self.p['T_REF_K']) / 10.0)
+                )
+                soil_resp_step = r_soil_kg_m2_yr / (365 * self.p['STEPS_PER_DAY'])
+                total_soil_resp_kg_m2 += soil_resp_step
 
                 self.S['SWE_can'] = max(0, self.S['SWE_can'] + self.p['snow_intercepted_m'] - dSWE_c)
                 self.S['SWE'] = max(0, self.S['SWE'] + self.p['snowfall_m_step'] - self.p['snow_intercepted_m'] - dSWE_g)
@@ -612,11 +623,18 @@ class ForestSimulator:
                 else:
                     self.L_stability = 1e6
 
-        net_carbon_change = total_gpp_kg_m2 - total_reco_kg_m2
+        net_biomass_change = total_gpp_kg_m2 - total_autotrophic_resp_kg_m2
+        net_soil_change = -total_soil_resp_kg_m2
+        net_carbon_change = net_biomass_change + net_soil_change
         # self.carbon_stock_kg_m2 is no longer updated here.
         # The environment is responsible for tracking the state.
 
-        return {"delta_carbon_kg_m2": net_carbon_change, "thaw_degree_days": total_thaw_degree_days}
+        return {
+            "delta_biomass_carbon_kg_m2": net_biomass_change,
+            "delta_soil_carbon_kg_m2": net_soil_change,
+            "delta_carbon_kg_m2": net_carbon_change,
+            "thaw_degree_days": total_thaw_degree_days,
+        }
 
 # ----------------------------------------------------------------------------------
 # ORIGINAL DRIVER & PLOTTING (for standalone testing)
@@ -629,23 +647,22 @@ if __name__ == "__main__":
     sim = ForestSimulator(
         coniferous_fraction=0.5,
         stem_density=800,
-        carbon_stock_kg_m2=15.0,
         weather_seed=123
     )
 
-    # In the test run, we pass the simulator's own carbon stock as the input
+    # In the test run, we pass representative carbon pools
     annual_results = sim.run_annual_cycle(
         new_conifer_fraction=0.5,
         new_stem_density=800,
-        current_carbon_stock_kg_m2=sim.carbon_stock_kg_m2
+        current_biomass_carbon_kg_m2=10.0,
+        current_soil_carbon_kg_m2=5.0,
     )
 
     print("\n--- Annual Simulation Results ---")
     print(f"Net Carbon Change: {annual_results['delta_carbon_kg_m2']:.4f} kg C/m^2/yr")
+    print(f"Biomass Change: {annual_results['delta_biomass_carbon_kg_m2']:.4f} kg C/m^2/yr")
+    print(f"Soil Carbon Change: {annual_results['delta_soil_carbon_kg_m2']:.4f} kg C/m^2/yr")
     print(f"Thaw Degree Days: {annual_results['thaw_degree_days']:.2f} TDD")
-    # Manually calculate the final carbon stock for the print statement
-    final_carbon_stock = sim.carbon_stock_kg_m2 + annual_results['delta_carbon_kg_m2']
-    print(f"Final Carbon Stock: {final_carbon_stock:.4f} kg C/m^2")
 
     # The original plotting functions could be adapted here to plot data from
     # a detailed history log, if one were added to the simulator class.

@@ -89,7 +89,8 @@ class ForestEnv(gym.Env):
         self.year = 0
         self.stem_density = 0
         self.conifer_fraction = 0.0
-        self.carbon_stock_kg_m2 = 0.0
+        self.biomass_carbon_kg_m2 = 0.0
+        self.soil_carbon_kg_m2 = 0.0
         self.cumulative_thaw_dd = 0.0
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -100,7 +101,9 @@ class ForestEnv(gym.Env):
         self.year = 0
         self.stem_density = 800  # Starting stems per hectare
         self.conifer_fraction = 0.5  # Start with a 50/50 mix
-        self.carbon_stock_kg_m2 = 15.0  # Initial carbon stock in kg C/m^2
+        # Initialize separate carbon pools (kg C/m^2)
+        self.biomass_carbon_kg_m2 = 10.0
+        self.soil_carbon_kg_m2 = 5.0
         self.cumulative_thaw_dd = 0.0
 
         # --- Initialize Simulator for a New Monte-Carlo Episode ---
@@ -108,7 +111,6 @@ class ForestEnv(gym.Env):
         self.simulator = ebm.ForestSimulator(
             coniferous_fraction=self.conifer_fraction,
             stem_density=self.stem_density,
-            carbon_stock_kg_m2=self.carbon_stock_kg_m2,
             weather_seed=self.np_random.integers(0, 2**31 - 1)
         )
 
@@ -130,11 +132,11 @@ class ForestEnv(gym.Env):
         # Track carbon loss from thinning, based on the *actual* change in density
         carbon_loss_thinning = 0
         if self.stem_density < old_density:
-            # Thinning occurred, calculate carbon loss proportionally
+            # Thinning occurred, calculate carbon loss proportionally (above-ground biomass only)
             # Use old_density in denominator to avoid division by zero if forest is cleared
-            carbon_loss_thinning = self.carbon_stock_kg_m2 * (old_density - self.stem_density) / old_density
+            carbon_loss_thinning = self.biomass_carbon_kg_m2 * (old_density - self.stem_density) / old_density
 
-        self.carbon_stock_kg_m2 -= carbon_loss_thinning
+        self.biomass_carbon_kg_m2 -= carbon_loss_thinning
 
         # Apply species mix change
         self.conifer_fraction = np.clip(self.conifer_fraction + delta_mix, 0.0, 1.0)
@@ -146,12 +148,16 @@ class ForestEnv(gym.Env):
         annual_results = self.simulator.run_annual_cycle(
             new_conifer_fraction=self.conifer_fraction,
             new_stem_density=self.stem_density,
-            current_carbon_stock_kg_m2=self.carbon_stock_kg_m2
+            current_biomass_carbon_kg_m2=self.biomass_carbon_kg_m2,
+            current_soil_carbon_kg_m2=self.soil_carbon_kg_m2,
         )
-        ΔC_year = annual_results['delta_carbon_kg_m2']
+        ΔC_biomass = annual_results['delta_biomass_carbon_kg_m2']
+        ΔC_soil = annual_results['delta_soil_carbon_kg_m2']
         thaw_dd_year = annual_results['thaw_degree_days']
 
-        self.carbon_stock_kg_m2 += ΔC_year
+        self.biomass_carbon_kg_m2 += ΔC_biomass
+        self.soil_carbon_kg_m2 += ΔC_soil
+        ΔC_year = ΔC_biomass + ΔC_soil
         self.cumulative_thaw_dd += thaw_dd_year
 
         # 3. Calculate reward
@@ -170,8 +176,9 @@ class ForestEnv(gym.Env):
     def _get_obs(self):
         norm_year = self.year / self.EPISODE_LENGTH_YEARS
         norm_density = (self.stem_density - self.MIN_STEMS_HA) / (self.MAX_STEMS_HA - self.MIN_STEMS_HA)
-        # Normalize carbon stock assuming a plausible max value (e.g., 50 kg C/m^2)
-        norm_carbon = self.carbon_stock_kg_m2 / 50.0
+        # Normalize total carbon stock assuming a plausible max value (e.g., 50 kg C/m^2)
+        total_carbon = self.biomass_carbon_kg_m2 + self.soil_carbon_kg_m2
+        norm_carbon = total_carbon / 50.0
 
         return np.array([
             norm_year,
@@ -181,11 +188,14 @@ class ForestEnv(gym.Env):
         ], dtype=np.float32)
 
     def _get_info(self):
+        total_carbon = self.biomass_carbon_kg_m2 + self.soil_carbon_kg_m2
         return {
             "year": self.year,
             "stem_density_ha": self.stem_density,
             "conifer_fraction": self.conifer_fraction,
-            "carbon_stock_kg_m2": self.carbon_stock_kg_m2,
+            "biomass_carbon_kg_m2": self.biomass_carbon_kg_m2,
+            "soil_carbon_kg_m2": self.soil_carbon_kg_m2,
+            "carbon_stock_kg_m2": total_carbon,
             "cumulative_thaw_dd": self.cumulative_thaw_dd
         }
 
@@ -269,7 +279,8 @@ def evaluate_policy(model_path="ppo_forest_manager.zip", n_eval_episodes=1000):
 
         # Episode is done, record final metrics
         # Convert kg/m^2 to tonnes/hectare (1 kg/m^2 = 10 t/ha)
-        final_carbon_tC_ha = info['carbon_stock_kg_m2'] * 10
+        total_carbon = info['biomass_carbon_kg_m2'] + info['soil_carbon_kg_m2']
+        final_carbon_tC_ha = total_carbon * 10
         results["final_carbon_stock_tC_ha"].append(final_carbon_tC_ha)
         results["cumulative_thaw_dd"].append(info['cumulative_thaw_dd'])
 
