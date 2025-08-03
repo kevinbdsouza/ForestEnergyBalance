@@ -92,9 +92,9 @@ def get_model_config() -> Dict[str, Any]:
         summer_day_start=150, summer_day_end=250, shoulder_1_start=90,
         shoulder_1_end=150, shoulder_2_start=250, shoulder_2_end=300,
         snow_season_end=120, snow_season_start=280,
-        # --- Phenology (Fixed) --------------------------------------------
-        growth_day=140, fall_day=270, growth_rate=0.1, fall_rate=0.1,
-        woody_area_index=0.35,
+        # --- Phenology (Ranged) -------------------------------------------
+        growth_day_range=(130, 150), fall_day_range=(260, 280),
+        growth_rate=0.1, fall_rate=0.1, woody_area_index=0.35,
         # --- Trunk parameters (Fixed) -------------------------------------
         A_trunk_plan=0.03, A_trunk_vert=0.08, k_ct_base_con=0.18,
         k_ct_base_dec=0.12, d_ct=0.1, A_c2t=0.08, k_tsn=0.05, d_tsn=0.1,
@@ -216,7 +216,7 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float,
               np.cos(np.deg2rad(p['latitude_deg'])) * np.cos(np.deg2rad(decl)) * np.cos(np.deg2rad(15 * (hour - 12))))
     p["Q_solar"] = max(0.0, 1000.0 * cos_tz)
 
-    # --- Leaf phenology (mixed species) -----------------------------------
+    # --- Leaf phenology (mixed species; sampled growth/fall days) ---------
     leaf_on = 1 / (1 + np.exp(-p['growth_rate'] * (day - p['growth_day'])))
     leaf_off = 1 / (1 + np.exp(p['fall_rate'] * (day - p['fall_day'])))
     LAI_deciduous_actual = p["LAI_max_deciduous"] * leaf_on * leaf_off
