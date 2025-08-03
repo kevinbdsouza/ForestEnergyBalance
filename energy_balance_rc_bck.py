@@ -69,13 +69,14 @@ def get_model_config() -> Dict[str, Any]:
         H_atm=100.0,
         tau_adv=3600.0,
 
-        # --- Aerodynamic parameters -----------------------------------------
+        # --- Aerodynamic parameters (some ranged) -------------------------
         z_ref_h=15.0,     # reference height for h_can (m)
         z0_can=1.5,       # canopy roughness length (m)
         z_ref_soil=2.0,   # reference height for h_soil (m)
         z0_soil=0.01,     # soil roughness length (m)
         h_trunk_const=5.0,    # constant term for h_trunk
         h_trunk_wind_coeff=4.0, # wind coefficient for h_trunk
+        u_ref_range=(1.0, 5.0),
 
         # --- Soil & Water parameters ---------------------------------------
         d_soil_surf=0.3, d_soil_deep=1.7,
@@ -204,7 +205,11 @@ def get_baseline_parameters(config: Dict, coniferous_fraction: float = 0.0) -> D
     p['coniferous_fraction'] = coniferous_fraction
     deciduous_fraction = 1.0 - coniferous_fraction
 
-    u = 2.0  # reference wind (m s⁻¹)
+    if 'u_ref_range' in p:
+        p['u_ref'] = np.random.uniform(*p['u_ref_range'])
+        del p['u_ref_range']
+
+    u = p['u_ref']  # reference wind (m s⁻¹)
 
     # --- Species-specific parameters ---
     con_params = dict(
@@ -334,8 +339,7 @@ def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float)
     p['trunk_radius_m'] = np.sqrt(p['A_trunk_plan'] / (p['trunk_density_per_m2'] * np.pi))
 
     # --- Aerodynamic conductances (NOW DYNAMIC) --------------------------------
-    # Reference wind speed `u` is still fixed for simplicity
-    u = 2.0 
+    u = p['u_ref']
     h_can_raw = h_aero(u, p['z_ref_h'], p['z0_can'], L, p)
     h_soil_raw = h_aero(u, p['z_ref_soil'], p['z0_soil'], L, p)
     p['h_can'] = max(h_can_raw, p['CANOPY_MIN_H'])  # never < floor
@@ -736,7 +740,7 @@ def run_dynamic_simulation(total_days: int = 1095, spin_up_days: int = 365, coni
         
         if abs(H_total) > 1e-3: # Avoid near-zero flux
             # 1. Calculate friction velocity (u_star)
-            u = 2.0 # Still using fixed reference wind
+            u = p['u_ref']
             psi_m, _ = get_stability_correction(p['z_ref_h'], L_stability)
             u_star_log_term = np.log(p['z_ref_h'] / p['z0_can']) - psi_m
             if u_star_log_term <= 0:
