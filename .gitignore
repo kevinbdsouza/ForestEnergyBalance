@@ -6,6 +6,7 @@ __pycache__/
 plots/
 old/
 docs/
+ppo_forest_tensorboard/
 
 # C extensions
 *.so
