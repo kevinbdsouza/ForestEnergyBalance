@@ -200,26 +200,56 @@ def get_baseline_parameters(p: Dict, coniferous_fraction: float, stem_density: f
     return p
 
 def update_dynamic_parameters(p: Dict, day: int, hour: float, S: dict, L: float, rng: np.random.Generator):
-    # --- Air temperature: annual + diurnal + STOCHASTIC offset --------------
+    """Update parameters that vary at sub-daily timesteps.
+
+    Stochastic temperature offsets and precipitation are generated once per
+    day and reused for all sub-daily steps.  Daily values are stored in
+    ``p['daily_state']`` and refreshed at the start of each day.
+    """
+
     day_angle = 2 * np.pi * (day - 1) / 365.0
-    p["T_large_scale"] = 273.15 + p['T_annual_mean_offset'] - p['T_seasonal_amplitude'] * np.cos(day_angle) \
-                         + rng.normal(0, p['T_daily_noise_std'])  # Daily stochastic temp
+
+    # ------------------------------------------------------------------
+    # Generate daily stochastic terms once per day
+    # ------------------------------------------------------------------
+    daily_state = p.setdefault('daily_state', {})
+    if daily_state.get('day') != day:
+        temp_noise = rng.normal(0, p['T_daily_noise_std'])
+        T_ls = 273.15 + p['T_annual_mean_offset'] - p['T_seasonal_amplitude'] * np.cos(day_angle) + temp_noise
+        T_for_precip = T_ls - p['T_diurnal_amplitude'] * np.cos(2 * np.pi * (0 - p['T_hour_peak_diurnal']) / 24.0)
+
+        rain_mm_day, snowfall_mm_day = 0.0, 0.0
+        if T_for_precip > 274.15:
+            if p['summer_day_start'] < day < p['summer_day_end']:
+                if rng.random() < p['rain_summer_prob']:
+                    rain_mm_day = rng.exponential(p['rain_summer_mm_day'])
+            elif (p['shoulder_1_start'] < day < p['shoulder_1_end']) or (p['shoulder_2_start'] < day < p['shoulder_2_end']):
+                if rng.random() < p['rain_shoulder_prob']:
+                    rain_mm_day = rng.exponential(p['rain_shoulder_mm_day'])
+        elif T_for_precip < 272.15 and (day > p['snow_season_start'] or day < p['snow_season_end']):
+            if rng.random() < p['snow_winter_prob']:
+                snowfall_mm_day = rng.exponential(p['winter_snow_mm_day'])
+
+        daily_state.update({
+            'day': day,
+            'temp_noise': temp_noise,
+            'rain_mm_day': rain_mm_day,
+            'snow_mm_day': snowfall_mm_day,
+        })
+
+    temp_noise = daily_state['temp_noise']
+    rain_mm_day = daily_state['rain_mm_day']
+    snowfall_mm_day = daily_state['snow_mm_day']
+
+    # --- Air temperature: annual + diurnal + stored stochastic offset -----
+    p["T_large_scale"] = 273.15 + p['T_annual_mean_offset'] - p['T_seasonal_amplitude'] * np.cos(day_angle) + temp_noise
     p["T_atm"] = p["T_large_scale"] - p['T_diurnal_amplitude'] * np.cos(2 * np.pi * (hour - p['T_hour_peak_diurnal']) / 24.0)
     p['ea'] = p['mean_relative_humidity'] * esat_kPa(p['T_atm'])
     swc_frac = S['SWC_mm'] / p['SWC_max_mm']  # uses sampled soil water capacity
     stress_range = 1.0 - p['soil_stress_threshold']
     p['soil_stress'] = np.clip((swc_frac - p['soil_stress_threshold']) / stress_range, 0.0, 1.0)
 
-    # --- STOCHASTIC Precipitation & Snowfall --------------------------------
-    rain_mm_day, snowfall_mm_day = 0.0, 0.0
-    if p['T_atm'] > 274.15:
-        if p['summer_day_start'] < day < p['summer_day_end']:
-            if rng.random() < p['rain_summer_prob']: rain_mm_day = rng.exponential(p['rain_summer_mm_day'])
-        elif (p['shoulder_1_start'] < day < p['shoulder_1_end']) or (p['shoulder_2_start'] < day < p['shoulder_2_end']):
-            if rng.random() < p['rain_shoulder_prob']: rain_mm_day = rng.exponential(p['rain_shoulder_mm_day'])
-    elif p['T_atm'] < 272.15 and (day > p['snow_season_start'] or day < p['snow_season_end']):
-        if rng.random() < p['snow_winter_prob']: snowfall_mm_day = rng.exponential(p['winter_snow_mm_day'])
-
+    # --- Precipitation & Snowfall: reuse daily totals -------------------
     p['rain_m_step'] = rain_mm_day / 1000.0 / p['STEPS_PER_DAY']
     p['snowfall_m_step'] = snowfall_mm_day / 1000.0 / p['STEPS_PER_DAY']
 
@@ -485,6 +515,8 @@ class ForestSimulator:
         temp_nodes = [n for n in self.S if 'SWE' not in n and 'SWC' not in n]
 
         for day in range(1, 366):
+            # Reset daily stochastic state at the start of each day
+            self.p['daily_state'] = {}
             for t_step in range(self.p['STEPS_PER_DAY']):
                 hour = t_step * self.p['TIME_STEP_MINUTES'] / 60.0
                 self.p = update_dynamic_parameters(self.p, day, hour, self.S, self.L_stability, self.rng)
